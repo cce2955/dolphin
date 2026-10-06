@@ -83,9 +83,10 @@ void Shutdown(Core::System& system)
   system.GetCoreTiming().Shutdown();
 }
 
-void DoState(Core::System& system, PointerWrap& p)
+void DoState(Core::System& system, PointerWrap& p, bool include_large_memory,
+             const void* external_ram, const void* external_exram)
 {
-  system.GetMemory().DoState(p);
+  system.GetMemory().DoState(p, include_large_memory, external_ram, external_exram);
   p.DoMarker("Memory");
   system.GetMemoryInterface().DoState(p);
   p.DoMarker("MemoryInterface");

@@ -338,6 +338,10 @@ void UpdatePerformanceMonitor(u32 cycles, u32 num_load_stores, u32 num_fp_inst,
 void CheckExceptionsFromJIT(PowerPCManager& power_pc);
 void CheckExternalExceptionsFromJIT(PowerPCManager& power_pc);
 void CheckAndHandleBreakPointsFromJIT(PowerPCManager& power_pc);
+void RecordTVCBattleBoundary();
+u64 GetTVCBattleBoundaryCount();
+void SetTVCRollbackInput(const u8* pad_status, size_t size);
+void InjectTVCRollbackInput();
 
 // Easy register access macros.
 #define HID0(ppc_state) ((UReg_HID0&)(ppc_state).spr[SPR_HID0])

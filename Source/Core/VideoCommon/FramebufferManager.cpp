@@ -26,6 +26,10 @@
 #include "VideoCommon/VideoCommon.h"
 #include "VideoCommon/VideoConfig.h"
 
+#ifdef __LIBRETRO__
+bool TVCRollbackStateModeEnabled();
+#endif
+
 // Maximum number of pixels poked in one batch * 6
 constexpr size_t MAX_POKE_VERTICES = 32768;
 
@@ -1103,6 +1107,10 @@ void FramebufferManager::DoState(PointerWrap& p)
   p.Do(m_prev_efb_format);
 
   bool save_efb_state = Config::Get(Config::GFX_SAVE_TEXTURE_CACHE_TO_STATE);
+#ifdef __LIBRETRO__
+  if (TVCRollbackStateModeEnabled())
+    save_efb_state = false;
+#endif
   p.Do(save_efb_state);
   if (!save_efb_state)
     return;

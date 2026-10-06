@@ -26,6 +26,8 @@
 #ifdef __LIBRETRO__
 #include "Core/Config/MainSettings.h"
 #include "VideoCommon/VideoBackendBase.h"
+
+bool TVCRollbackReplayModeEnabled();
 #endif
 
 std::unique_ptr<VideoCommon::Presenter> g_presenter;
@@ -931,6 +933,13 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
 void Presenter::Present(PresentInfo* present_info)
 {
   m_present_count++;
+
+#ifdef __LIBRETRO__
+  // Rollback replay only needs the final corrected frame. Keep emulating GPU state and XFB
+  // updates, but do not render or submit intermediate frames to the host backbuffer.
+  if (TVCRollbackReplayModeEnabled())
+    return;
+#endif
 
   if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
     return;

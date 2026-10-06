@@ -503,7 +503,8 @@ void MemoryManager::RemoveAllPageTableMappings()
   m_large_writeable_pages.clear();
 }
 
-void MemoryManager::DoState(PointerWrap& p)
+void MemoryManager::DoState(PointerWrap& p, bool include_large_memory,
+                            const void* external_ram, const void* external_exram)
 {
   const u32 current_ram_size = GetRamSize();
   const u32 current_l1_cache_size = GetL1CacheSize();
@@ -541,14 +542,19 @@ void MemoryManager::DoState(PointerWrap& p)
     return;
   }
 
-  p.DoArray(m_ram, current_ram_size);
+  if (include_large_memory)
+    p.DoArray(m_ram, current_ram_size);
+  else if (p.IsReadMode() && external_ram)
+    std::memcpy(m_ram, external_ram, current_ram_size);
   p.DoArray(m_l1_cache, current_l1_cache_size);
   p.DoMarker("Memory RAM");
   if (current_have_fake_vmem)
     p.DoArray(m_fake_vmem, current_fake_vmem_size);
   p.DoMarker("Memory FakeVMEM");
-  if (current_have_exram)
+  if (current_have_exram && include_large_memory)
     p.DoArray(m_exram, current_exram_size);
+  else if (current_have_exram && p.IsReadMode() && external_exram)
+    std::memcpy(m_exram, external_exram, current_exram_size);
   p.DoMarker("Memory EXRAM");
 }
 

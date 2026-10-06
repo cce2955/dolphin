@@ -417,6 +417,13 @@ u32 CEXIIPL::GetEmulatedTime(Core::System& system, u32 epoch)
     // let's keep time moving forward, regardless of what it starts at
     ltime += system.GetCoreTiming().GetTicks() / system.GetSystemTimers().GetTicksPerSecond();
   }
+  else if (Core::WantsDeterminism())
+  {
+    // The TVC frontend owns rollback transport instead of Dolphin NetPlay, so
+    // provide the same tick-derived clock behavior from a fixed shared epoch.
+    ltime = 1700000000ULL;
+    ltime += system.GetCoreTiming().GetTicks() / system.GetSystemTimers().GetTicksPerSecond();
+  }
   else
   {
     ASSERT(!Core::WantsDeterminism());

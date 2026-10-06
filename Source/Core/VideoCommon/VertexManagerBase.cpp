@@ -44,6 +44,10 @@
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
 
+#ifdef __LIBRETRO__
+bool TVCRollbackReplayModeEnabled();
+#endif
+
 std::unique_ptr<VertexManagerBase> g_vertex_manager;
 
 using OpcodeDecoder::Primitive;
@@ -544,6 +548,21 @@ void VertexManagerBase::Flush()
     }
   }
 
+#ifdef __LIBRETRO__
+  if (TVCRollbackReplayModeEnabled())
+  {
+    // The intermediate frames are never displayed. GX register writes and command decoding have
+    // already happened, so retain draw-counter side effects without loading textures, preparing
+    // shaders, or submitting GPU work. The final corrected frame follows the normal path.
+    if (!m_cull_all)
+    {
+      OnDraw();
+      g_framebuffer_manager->FlagPeekCacheAsOutOfDate();
+    }
+    return;
+  }
+#endif
+
   auto& pixel_shader_manager = system.GetPixelShaderManager();
   auto& geometry_shader_manager = system.GetGeometryShaderManager();
   auto& vertex_shader_manager = system.GetVertexShaderManager();
@@ -615,6 +634,11 @@ void VertexManagerBase::Flush()
     std::vector<std::string> custom_pixel_texture_names;
     std::span<u8> custom_pixel_shader_uniforms;
     bool skip = false;
+#ifdef __LIBRETRO__
+    // Intermediate rollback frames update GX state but are never shown. Avoid submitting their
+    // draw calls; the final corrected frame renders normally after replay mode is cleared.
+    skip = TVCRollbackReplayModeEnabled();
+#endif
     for (size_t i = 0; i < texture_names.size(); i++)
     {
       GraphicsModActionData::DrawStarted draw_started{texture_units, &skip, &custom_pixel_shader,

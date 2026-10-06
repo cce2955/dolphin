@@ -1,8 +1,10 @@
 
 #include <cstdint>
 #include <libretro.h>
+#include <array>
 #include <string>
 #include <thread>
+#include <atomic>
 
 #include <fstream>
 #include <vector>
@@ -28,11 +30,13 @@
 #include "Core/GeckoCodeConfig.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
+#include "Core/HW/EXI/EXI_DeviceTVC.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/VideoInterface.h"
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
 #include "Core/IOS/USB/Emulated/Microphone.h"
 #include "Core/PatchEngine.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "DolphinLibretro/Audio.h"
@@ -44,7 +48,9 @@
 #include "VideoCommon/AsyncRequests.h"
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/OnScreenDisplay.h"
+#include "VideoCommon/TextureCacheBase.h"
 #include "VideoCommon/TextureConfig.h"
+#include "VideoCommon/TextureDecoder.h"
 #include "VideoCommon/VideoCommon.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/Widescreen.h"
@@ -81,6 +87,25 @@ static bool s_refresh_rate_settled = false;
 extern void reload_cheats_from_ini();
 extern unsigned msg_interface_version;
 }  // namespace Libretro
+
+static std::atomic<bool> s_tvc_rollback_replay_mode{false};
+static std::atomic<bool> s_tvc_rollback_state_mode{false};
+static std::array<std::vector<u8>, 3> s_tvc_rollback_memory_shadows;
+static std::array<std::vector<u32>, 3> s_tvc_rollback_dirty_pages;
+static std::array<std::vector<u8>, 3> s_tvc_rollback_dirty_data;
+static std::array<bool, 3> s_tvc_rollback_dirty_prepared{};
+constexpr size_t TVC_ROLLBACK_PAGE_SIZE = 4096;
+constexpr size_t TVC_ROLLBACK_SCAN_BLOCK_SIZE = 256 * 1024;
+
+bool TVCRollbackReplayModeEnabled()
+{
+  return s_tvc_rollback_replay_mode.load(std::memory_order_relaxed);
+}
+
+bool TVCRollbackStateModeEnabled()
+{
+  return s_tvc_rollback_state_mode.load(std::memory_order_relaxed);
+}
 
 extern "C" {
 
@@ -494,6 +519,7 @@ void retro_run(void)
 
   RETRO_PERFORMANCE_STOP(dolphin_main_func);
 
+  if (!TVCRollbackReplayModeEnabled())
   if (auto* sound_stream = system.GetSoundStream())
   {
     auto* libretro_stream = static_cast<Libretro::Audio::Stream*>(sound_stream);
@@ -596,6 +622,335 @@ unsigned retro_api_version()
 {
   return RETRO_API_VERSION;
 }
+
+extern "C" RETRO_API size_t tvc_bridge_write(const void* data, size_t size)
+{
+  return ExpansionInterface::TVCBridge::HostWrite(static_cast<const u8*>(data), size);
+}
+
+extern "C" RETRO_API size_t tvc_bridge_read(void* data, size_t size)
+{
+  return ExpansionInterface::TVCBridge::HostRead(static_cast<u8*>(data), size);
+}
+
+extern "C" RETRO_API size_t tvc_bridge_pending_to_game()
+{
+  return ExpansionInterface::TVCBridge::PendingToGame();
+}
+
+extern "C" RETRO_API size_t tvc_bridge_pending_from_game()
+{
+  return ExpansionInterface::TVCBridge::PendingFromGame();
+}
+
+extern "C" RETRO_API void tvc_bridge_reset()
+{
+  ExpansionInterface::TVCBridge::Reset();
+}
+
+extern "C" RETRO_API size_t tvc_rollback_serialize_size()
+{
+  // Rollback deltas require a stable region size. Texture and framebuffer caches are rebuilt
+  // after a load, leaving the measured deterministic TVC core state below this fixed ceiling.
+  return 4 * 1024 * 1024;
+}
+
+static std::atomic<size_t> s_tvc_rollback_serialized_bytes{0};
+
+extern "C" RETRO_API u64 tvc_rollback_section_time_us(unsigned section)
+{
+  return State::GetLastRollbackSectionTimeUs(section);
+}
+
+extern "C" RETRO_API size_t tvc_rollback_serialized_bytes()
+{
+  return s_tvc_rollback_serialized_bytes.load(std::memory_order_relaxed);
+}
+
+extern "C" RETRO_API bool tvc_rollback_serialize(void* data, size_t size)
+{
+  u8* const start = static_cast<u8*>(data);
+  s_tvc_rollback_serialized_bytes.store(0, std::memory_order_relaxed);
+  Core::System& system = Core::System::GetInstance();
+  AsyncRequests* ar = AsyncRequests::GetInstance();
+  if (system.IsDualCoreMode())
+    ar->SetPassthrough(true);
+  const bool was_cpu = Core::IsCPUThread();
+  if (!was_cpu)
+    Core::DeclareAsCPUThread();
+
+  bool valid = false;
+  Core::RunOnCPUThread(system, [&] {
+    s_tvc_rollback_state_mode.store(true, std::memory_order_relaxed);
+    PointerWrap p(reinterpret_cast<u8**>(&data), size, PointerWrap::Mode::Write);
+    State::DoState(Core::System::GetInstance(), p, false);
+    s_tvc_rollback_state_mode.store(false, std::memory_order_relaxed);
+    valid = p.IsWriteMode();
+    if (valid)
+      s_tvc_rollback_serialized_bytes.store(static_cast<u8*>(data) - start,
+                                            std::memory_order_relaxed);
+  }, true);
+
+  if (!was_cpu)
+    Core::UndeclareAsCPUThread();
+  if (system.IsDualCoreMode())
+    ar->SetPassthrough(false);
+  return valid;
+}
+
+extern "C" RETRO_API void tvc_rollback_set_replay_mode(bool enabled)
+{
+  s_tvc_rollback_replay_mode.store(enabled, std::memory_order_relaxed);
+}
+
+extern "C" RETRO_API u64 tvc_rollback_battle_boundary_count()
+{
+  return PowerPC::GetTVCBattleBoundaryCount();
+}
+
+extern "C" RETRO_API void tvc_rollback_set_input(const void* pad_status, size_t size)
+{
+  PowerPC::SetTVCRollbackInput(static_cast<const u8*>(pad_status), size);
+}
+
+extern "C" RETRO_API bool tvc_rollback_unserialize(const void* data, size_t size,
+                                                    const void* mem1, size_t mem1_size,
+                                                    const void* mem2, size_t mem2_size,
+                                                    const void* tmem, size_t tmem_size)
+{
+  Core::System& system = Core::System::GetInstance();
+  auto& memory = system.GetMemory();
+  if (!mem1 || !mem2 || !tmem || mem1_size != memory.GetRamSizeReal() ||
+      mem2_size != memory.GetExRamSizeReal() || tmem_size != s_tex_mem.size())
+    return false;
+
+  AsyncRequests* ar = AsyncRequests::GetInstance();
+  if (system.IsDualCoreMode())
+    ar->SetPassthrough(true);
+  const bool was_cpu = Core::IsCPUThread();
+  if (!was_cpu)
+    Core::DeclareAsCPUThread();
+
+  bool valid = false;
+  void* cursor = const_cast<void*>(data);
+  Core::RunOnCPUThread(system, [&] {
+    if (g_texture_cache)
+      g_texture_cache->FlushEFBCopies();
+    std::memcpy(memory.GetRAM(), mem1, mem1_size);
+    std::memcpy(memory.GetEXRAM(), mem2, mem2_size);
+    std::memcpy(s_tex_mem.data(), tmem, tmem_size);
+    PointerWrap p(reinterpret_cast<u8**>(&cursor), size, PointerWrap::Mode::Read);
+    s_tvc_rollback_state_mode.store(true, std::memory_order_relaxed);
+    State::DoState(system, p, false);
+    s_tvc_rollback_state_mode.store(false, std::memory_order_relaxed);
+    valid = p.IsReadMode();
+  }, true);
+
+  if (!was_cpu)
+    Core::UndeclareAsCPUThread();
+  if (system.IsDualCoreMode())
+    ar->SetPassthrough(false);
+  return valid;
+}
+
+extern "C" RETRO_API bool tvc_rollback_unserialize_pages(
+    const void* data, size_t size, const void* mem1, size_t mem1_size,
+    const u32* mem1_pages, size_t mem1_page_count, const void* mem2, size_t mem2_size,
+    const u32* mem2_pages, size_t mem2_page_count, const void* tmem, size_t tmem_size,
+    const u32* tmem_pages, size_t tmem_page_count)
+{
+  Core::System& system = Core::System::GetInstance();
+  auto& memory = system.GetMemory();
+  if (!mem1 || !mem2 || !tmem || mem1_size != memory.GetRamSizeReal() ||
+      mem2_size != memory.GetExRamSizeReal() || tmem_size != s_tex_mem.size() ||
+      (mem1_page_count != 0 && !mem1_pages) || (mem2_page_count != 0 && !mem2_pages) ||
+      (tmem_page_count != 0 && !tmem_pages) ||
+      s_tvc_rollback_memory_shadows[0].size() != mem1_size ||
+      s_tvc_rollback_memory_shadows[1].size() != mem2_size ||
+      s_tvc_rollback_memory_shadows[2].size() != tmem_size)
+  {
+    return false;
+  }
+
+  const auto pages_valid = [](const u32* pages, size_t count, size_t memory_size) {
+    const size_t page_count = (memory_size + TVC_ROLLBACK_PAGE_SIZE - 1) /
+                              TVC_ROLLBACK_PAGE_SIZE;
+    for (size_t i = 0; i < count; ++i)
+    {
+      if (pages[i] >= page_count)
+        return false;
+    }
+    return true;
+  };
+  if (!pages_valid(mem1_pages, mem1_page_count, mem1_size) ||
+      !pages_valid(mem2_pages, mem2_page_count, mem2_size) ||
+      !pages_valid(tmem_pages, tmem_page_count, tmem_size))
+  {
+    return false;
+  }
+
+  AsyncRequests* ar = AsyncRequests::GetInstance();
+  if (system.IsDualCoreMode())
+    ar->SetPassthrough(true);
+  const bool was_cpu = Core::IsCPUThread();
+  if (!was_cpu)
+    Core::DeclareAsCPUThread();
+
+  bool valid = false;
+  void* cursor = const_cast<void*>(data);
+  Core::RunOnCPUThread(system, [&] {
+    if (g_texture_cache)
+      g_texture_cache->FlushEFBCopies();
+    const auto restore_pages = [](u8* destination, std::vector<u8>& shadow,
+                                  const u8* source, size_t memory_size,
+                                  const u32* pages, size_t count) {
+      for (size_t i = 0; i < count; ++i)
+      {
+        const size_t offset = static_cast<size_t>(pages[i]) * TVC_ROLLBACK_PAGE_SIZE;
+        const size_t bytes = std::min(TVC_ROLLBACK_PAGE_SIZE, memory_size - offset);
+        std::memcpy(destination + offset, source + offset, bytes);
+        std::memcpy(shadow.data() + offset, source + offset, bytes);
+      }
+    };
+    restore_pages(memory.GetRAM(), s_tvc_rollback_memory_shadows[0],
+                  static_cast<const u8*>(mem1), mem1_size, mem1_pages, mem1_page_count);
+    restore_pages(memory.GetEXRAM(), s_tvc_rollback_memory_shadows[1],
+                  static_cast<const u8*>(mem2), mem2_size, mem2_pages, mem2_page_count);
+    restore_pages(s_tex_mem.data(), s_tvc_rollback_memory_shadows[2],
+                  static_cast<const u8*>(tmem), tmem_size, tmem_pages, tmem_page_count);
+    PointerWrap p(reinterpret_cast<u8**>(&cursor), size, PointerWrap::Mode::Read);
+    s_tvc_rollback_state_mode.store(true, std::memory_order_relaxed);
+    State::DoState(system, p, false);
+    s_tvc_rollback_state_mode.store(false, std::memory_order_relaxed);
+    valid = p.IsReadMode();
+    for (size_t region = 0; region < s_tvc_rollback_dirty_pages.size(); ++region)
+    {
+      s_tvc_rollback_dirty_pages[region].clear();
+      s_tvc_rollback_dirty_data[region].clear();
+      s_tvc_rollback_dirty_prepared[region] = false;
+    }
+  }, true);
+
+  if (!was_cpu)
+    Core::UndeclareAsCPUThread();
+  if (system.IsDualCoreMode())
+    ar->SetPassthrough(false);
+  return valid;
+}
+
+extern "C" RETRO_API size_t tvc_rollback_memory_size(unsigned region)
+{
+  auto& memory = Core::System::GetInstance().GetMemory();
+  return region == 0 ? memory.GetRamSizeReal() :
+         region == 1 ? memory.GetExRamSizeReal() :
+         region == 2 ? s_tex_mem.size() : 0;
+}
+
+extern "C" RETRO_API void* tvc_rollback_memory_data(unsigned region)
+{
+  auto& memory = Core::System::GetInstance().GetMemory();
+  return region == 0 ? memory.GetRAM() :
+         region == 1 ? memory.GetEXRAM() :
+         region == 2 ? s_tex_mem.data() : nullptr;
+}
+
+extern "C" RETRO_API bool tvc_rollback_dirty_reset()
+{
+  auto& memory = Core::System::GetInstance().GetMemory();
+  const std::array<std::pair<u8*, size_t>, 3> regions = {{
+      {memory.GetRAM(), memory.GetRamSizeReal()},
+      {memory.GetEXRAM(), memory.GetExRamSizeReal()},
+      {s_tex_mem.data(), s_tex_mem.size()},
+  }};
+  for (size_t region = 0; region < regions.size(); ++region)
+  {
+    if (!regions[region].first || regions[region].second == 0)
+      return false;
+    s_tvc_rollback_memory_shadows[region].assign(
+        regions[region].first, regions[region].first + regions[region].second);
+    s_tvc_rollback_dirty_pages[region].clear();
+    s_tvc_rollback_dirty_data[region].clear();
+    s_tvc_rollback_dirty_prepared[region] = false;
+  }
+  return true;
+}
+
+static size_t PrepareTVCRollbackDirtyPages(unsigned region)
+{
+  if (region >= s_tvc_rollback_memory_shadows.size())
+    return SIZE_MAX;
+  if (s_tvc_rollback_dirty_prepared[region])
+    return s_tvc_rollback_dirty_pages[region].size();
+  auto& memory = Core::System::GetInstance().GetMemory();
+  u8* source = region == 0 ? memory.GetRAM() :
+               region == 1 ? memory.GetEXRAM() : s_tex_mem.data();
+  const size_t source_size = region == 0 ? memory.GetRamSizeReal() :
+                             region == 1 ? memory.GetExRamSizeReal() : s_tex_mem.size();
+  std::vector<u8>& shadow = s_tvc_rollback_memory_shadows[region];
+  if (!source || shadow.size() != source_size)
+    return SIZE_MAX;
+
+  std::vector<u32>& pages = s_tvc_rollback_dirty_pages[region];
+  std::vector<u8>& data = s_tvc_rollback_dirty_data[region];
+  pages.clear();
+  data.clear();
+  // Most of MEM2 remains unchanged during a frame. Compare a large contiguous block first, then
+  // inspect its 4 KiB pages only when the block differs. This preserves exact dirty-page output
+  // while avoiding tens of thousands of small memcmp calls per rollback snapshot.
+  for (size_t block_offset = 0; block_offset < source_size;
+       block_offset += TVC_ROLLBACK_SCAN_BLOCK_SIZE)
+  {
+    const size_t block_bytes =
+        std::min(TVC_ROLLBACK_SCAN_BLOCK_SIZE, source_size - block_offset);
+    if (std::memcmp(source + block_offset, shadow.data() + block_offset, block_bytes) == 0)
+      continue;
+    const size_t block_end = block_offset + block_bytes;
+    for (size_t offset = block_offset; offset < block_end; offset += TVC_ROLLBACK_PAGE_SIZE)
+    {
+      const size_t bytes = std::min(TVC_ROLLBACK_PAGE_SIZE, source_size - offset);
+      if (std::memcmp(source + offset, shadow.data() + offset, bytes) == 0)
+        continue;
+      pages.push_back(static_cast<u32>(offset / TVC_ROLLBACK_PAGE_SIZE));
+      const size_t data_offset = data.size();
+      data.resize(data_offset + TVC_ROLLBACK_PAGE_SIZE);
+      std::memcpy(data.data() + data_offset, source + offset, bytes);
+      if (bytes != TVC_ROLLBACK_PAGE_SIZE)
+        std::memset(data.data() + data_offset + bytes, 0, TVC_ROLLBACK_PAGE_SIZE - bytes);
+      std::memcpy(shadow.data() + offset, source + offset, bytes);
+    }
+  }
+  s_tvc_rollback_dirty_prepared[region] = true;
+  return pages.size();
+}
+
+extern "C" RETRO_API size_t tvc_rollback_capture_dirty_pages(
+    unsigned region, u32* page_indices, size_t page_capacity, void* page_data,
+    size_t page_data_capacity)
+{
+  if (region >= s_tvc_rollback_memory_shadows.size())
+    return SIZE_MAX;
+  const size_t changed = PrepareTVCRollbackDirtyPages(region);
+  if (changed == SIZE_MAX)
+    return SIZE_MAX;
+  if (changed > page_capacity || changed * TVC_ROLLBACK_PAGE_SIZE > page_data_capacity ||
+      (changed != 0 && (!page_indices || !page_data)))
+    return SIZE_MAX;
+  if (changed != 0)
+  {
+    std::memcpy(page_indices, s_tvc_rollback_dirty_pages[region].data(),
+                changed * sizeof(u32));
+    std::memcpy(page_data, s_tvc_rollback_dirty_data[region].data(),
+                changed * TVC_ROLLBACK_PAGE_SIZE);
+  }
+  s_tvc_rollback_dirty_prepared[region] = false;
+  return changed;
+}
+
+extern "C" RETRO_API size_t tvc_rollback_dirty_page_count(unsigned region)
+{
+  return PrepareTVCRollbackDirtyPages(region);
+}
+
 
 size_t retro_get_memory_size(unsigned id)
 {

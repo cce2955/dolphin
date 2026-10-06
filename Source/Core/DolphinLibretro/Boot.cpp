@@ -723,6 +723,10 @@ bool retro_load_game(const struct retro_game_info* game)
     }
   }
 
+  // The TVC frontend performs its own rollback transport. Dolphin still needs
+  // its deterministic CPU, FIFO, and IOS paths even though the built-in
+  // NetPlay client is not running.
+  Core::SetForceDeterminism(true);
   if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot_params), wsi))
   {
     ERROR_LOG_FMT(BOOT, "Could not boot {}", game->path);

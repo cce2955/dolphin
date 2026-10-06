@@ -4,6 +4,8 @@
 #include "Core/State.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <filesystem>
 #include <locale>
 #include <map>
@@ -56,6 +58,15 @@
 
 namespace State
 {
+#ifdef __LIBRETRO__
+static std::array<u64, 7> s_last_rollback_section_us{};
+
+u64 GetLastRollbackSectionTimeUs(unsigned section)
+{
+  return section < s_last_rollback_section_us.size() ?
+             s_last_rollback_section_us[section] : 0;
+}
+#endif
 #if defined(__LZO_STRICT_16BIT)
 static const u32 IN_LEN = 8 * 1024u;
 #elif defined(LZO_ARCH_I086) && !defined(LZO_HAVE_MM_HUGE_ARRAY)
@@ -138,7 +149,8 @@ static bool ReadHeader(const std::string& filename, StateHeader& header);
 #ifndef __LIBRETRO__
 static
 #endif
-void DoState(Core::System& system, PointerWrap& p)
+void DoState(Core::System& system, PointerWrap& p, bool include_large_memory,
+             const void* external_ram, const void* external_exram)
 {
   bool is_wii = system.IsWii() || system.IsMIOS();
   const bool is_wii_currently = is_wii;
@@ -173,31 +185,62 @@ void DoState(Core::System& system, PointerWrap& p)
 
   // Movie must be done before the video backend, because the window is redrawn in the video backend
   // state load, and the frame number must be up-to-date.
+#ifdef __LIBRETRO__
+  const auto section_start = std::chrono::steady_clock::now();
+  auto section_time = [&](unsigned section) {
+    s_last_rollback_section_us[section] = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - section_start).count());
+  };
+#endif
   system.GetMovie().DoState(p);
   p.DoMarker("Movie");
+#ifdef __LIBRETRO__
+  section_time(0);
+#endif
 
   // Begin with video backend, so that it gets a chance to clear its caches and writeback modified
   // things to RAM
   g_video_backend->DoState(p);
   p.DoMarker("video_backend");
+#ifdef __LIBRETRO__
+  section_time(1);
+#endif
 
   // CoreTiming needs to be restored before restoring Hardware because
   // the controller code might need to schedule an event if the controller has changed.
   system.GetCoreTiming().DoState(p);
   p.DoMarker("CoreTiming");
+#ifdef __LIBRETRO__
+  section_time(2);
+#endif
 
   // HW needs to be restored before PowerPC because the data cache might need to be flushed.
-  HW::DoState(system, p);
+  HW::DoState(system, p, include_large_memory, external_ram, external_exram);
   p.DoMarker("HW");
+#ifdef __LIBRETRO__
+  section_time(3);
+#endif
 
   system.GetPowerPC().DoState(p);
   p.DoMarker("PowerPC");
+#ifdef __LIBRETRO__
+  section_time(4);
+#endif
 
   if (system.IsWii())
     Wiimote::DoState(p);
   p.DoMarker("Wiimote");
+#ifdef __LIBRETRO__
+  section_time(5);
+#endif
   Gecko::DoState(p);
   p.DoMarker("Gecko");
+#ifdef __LIBRETRO__
+  section_time(6);
+  for (unsigned section = 6; section != 0; --section)
+    s_last_rollback_section_us[section] -= s_last_rollback_section_us[section - 1];
+#endif
 
 #ifdef USE_RETRO_ACHIEVEMENTS
   AchievementManager::GetInstance().DoState(p);

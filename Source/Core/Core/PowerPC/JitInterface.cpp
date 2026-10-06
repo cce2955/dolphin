@@ -27,6 +27,10 @@
 #include "Core/PowerPC/JitArm64/Jit.h"
 #endif
 
+#ifdef __LIBRETRO__
+bool TVCRollbackStateModeEnabled();
+#endif
+
 JitInterface::JitInterface(Core::System& system) : m_system(system)
 {
 }
@@ -40,7 +44,11 @@ void JitInterface::SetJit(std::unique_ptr<JitBase> jit)
 
 void JitInterface::DoState(PointerWrap& p)
 {
-  if (m_jit && p.IsReadMode())
+  if (m_jit && p.IsReadMode()
+#ifdef __LIBRETRO__
+      && !TVCRollbackStateModeEnabled()
+#endif
+  )
     m_jit->ClearCache();
 }
 
