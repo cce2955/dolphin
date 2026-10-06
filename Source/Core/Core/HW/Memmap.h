@@ -104,7 +104,8 @@ public:
   void Shutdown();
   bool InitFastmemArena();
   void ShutdownFastmemArena();
-  void DoState(PointerWrap& p);
+  void DoState(PointerWrap& p, bool include_large_memory = true,
+               const void* external_ram = nullptr, const void* external_exram = nullptr);
 
   void UpdateDBATMappings(const PowerPC::BatTable& dbat_table);
   void AddPageTableMapping(u32 logical_address, u32 translated_address, bool writeable);

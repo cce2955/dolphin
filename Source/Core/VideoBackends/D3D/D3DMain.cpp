@@ -112,9 +112,10 @@ void VideoBackend::FillBackendInfo()
   g_backend_info.bSupportsTextureQueryLevels = true;
   g_backend_info.bSupportsLodBiasInSampler = true;
 #ifdef __LIBRETRO__
-  if (Common::is_uwp())
-    g_backend_info.bSupportsLogicOp = false;
-  else
+  // Query the shared frontend device when present. A dangling else previously
+  // skipped this assignment on desktop libretro, leaving logic ops disabled.
+  g_backend_info.bSupportsLogicOp =
+      !Common::is_uwp() && D3D::SupportsLogicOp(g_Config.iAdapter);
 #else
   g_backend_info.bSupportsLogicOp = D3D::SupportsLogicOp(g_Config.iAdapter);
 #endif

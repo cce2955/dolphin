@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCoreDeepPerf.h"
 // Copyright 2008 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -441,6 +442,7 @@ void FifoManager::RunGpu()
 
 int FifoManager::RunGpuOnCpu(int ticks)
 {
+  CONTINUO_DEEP_SCOPE(GpuDecode);
   auto& command_processor = m_system.GetCommandProcessor();
   auto& fifo = command_processor.GetFifo();
   bool reset_simd_state = false;

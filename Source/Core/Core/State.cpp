@@ -138,7 +138,8 @@ static bool ReadHeader(const std::string& filename, StateHeader& header);
 #ifndef __LIBRETRO__
 static
 #endif
-void DoState(Core::System& system, PointerWrap& p)
+void DoState(Core::System& system, PointerWrap& p, bool include_large_memory,
+             const void* external_ram, const void* external_exram)
 {
   bool is_wii = system.IsWii() || system.IsMIOS();
   const bool is_wii_currently = is_wii;
@@ -187,7 +188,7 @@ void DoState(Core::System& system, PointerWrap& p)
   p.DoMarker("CoreTiming");
 
   // HW needs to be restored before PowerPC because the data cache might need to be flushed.
-  HW::DoState(system, p);
+  HW::DoState(system, p, include_large_memory, external_ram, external_exram);
   p.DoMarker("HW");
 
   system.GetPowerPC().DoState(p);

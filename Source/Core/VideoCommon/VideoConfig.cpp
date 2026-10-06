@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCoreDeepPerf.h"
 // Copyright 2008 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -292,6 +293,7 @@ u32 VideoConfig::GetShaderPrecompilerThreads() const
 
 void CheckForConfigChanges()
 {
+  CONTINUO_DEEP_SCOPE(ConfigUpdate);
   const ShaderHostConfig old_shader_host_config = ShaderHostConfig::GetCurrent();
   const StereoMode old_stereo = g_ActiveConfig.stereo_mode;
   const u32 old_multisamples = g_ActiveConfig.iMultisamples;

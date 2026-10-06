@@ -24,6 +24,7 @@
 #include "Core/HW/DSPHLE/UCodes/AXStructs.h"
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
+#include "Core/HW/DVD/ContinuoCharacterMusic.h"
 
 namespace DSP::HLE
 {
@@ -433,6 +434,11 @@ void ProcessVoice(HLEAccelerator* accelerator, PB_TYPE& pb, const AXBuffers& buf
   // Read input samples, performing sample rate conversion if needed.
   s16 samples[MAX_SAMPLES_PER_FRAME];
   GetInputSamples(accelerator, pb, samples, count, coeffs);
+
+  // Continuo: secondary character music at AX's native 32 kHz output.
+  ContinuoCharacterMusic::Mix(pb.adpcm.coefs, pb.audio_addr.sample_format,
+      pb.mixer.main_left.volume, pb.mixer.main_right.volume, {samples, count});
+
 
   // Apply a global volume ramp using the volume envelope parameters.
   for (u32 i = 0; i < count; ++i)

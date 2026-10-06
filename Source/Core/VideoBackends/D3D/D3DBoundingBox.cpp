@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCoreDeepPerf.h"
 // Copyright 2014 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -72,6 +73,7 @@ bool D3DBoundingBox::Initialize()
 
 std::vector<BBoxType> D3DBoundingBox::Read(u32 index, u32 length)
 {
+  CONTINUO_DEEP_SCOPE(BboxReadback);
   std::vector<BBoxType> values(length);
   D3D::context->CopyResource(m_staging_buffer.Get(), m_buffer.Get());
 

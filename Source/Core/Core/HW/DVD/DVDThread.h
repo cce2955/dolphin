@@ -84,6 +84,9 @@ public:
                               const DiscIO::Partition& partition, DVD::ReplyType reply_type,
                               s64 ticks_until_completion);
 
+  // Continuo: call with a CPUThreadGuard held before switching disc overrides.
+  void WaitForContinuoReads() { WaitUntilIdle(); }
+
 private:
   void WaitUntilIdle();
 

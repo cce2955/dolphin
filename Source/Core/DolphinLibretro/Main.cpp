@@ -1,3 +1,6 @@
+#include "DolphinLibretro/ContinuoCorePerf.h"
+#include "DolphinLibretro/ContinuoCoreDeepPerf.h"
+#include <cstdio>
 
 #include <cstdint>
 #include <libretro.h>
@@ -28,6 +31,7 @@
 #include "Core/GeckoCodeConfig.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
+#include "Core/HW/EXI/EXI_DeviceTVC.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/VideoInterface.h"
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
@@ -205,8 +209,8 @@ void retro_reset(void)
 
 void retro_run(void)
 {
-  Libretro::Input::InitSensors();
-  Libretro::Options::CheckForUpdatedVariables();
+  { CONTINUO_CORE_SCOPE(Input); Libretro::Input::InitSensors(); }
+  { CONTINUO_CORE_SCOPE(Options); Libretro::Options::CheckForUpdatedVariables(); }
   Libretro::FrameTiming::CheckForFastForwarding();
   if (Libretro::Options::IsUpdated(Libretro::Options::main_interface::LOG_LEVEL))
   {
@@ -237,7 +241,7 @@ void retro_run(void)
   // Crop to 4:3 when advertising 480-line geometry (NTSC / PAL60), tracked per frame.
   g_Config.bCropToAspectRatio = (Libretro::Video::GetAdjustedBaseHeight() == 480);
 
-  Libretro::Input::Update();
+  { CONTINUO_CORE_SCOPE(Input); Libretro::Input::Update(); }
 
   Core::System& system = Core::System::GetInstance();
 
@@ -320,8 +324,9 @@ void retro_run(void)
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_settings::EFB_SCALE))
   {
-    g_Config.iEFBScale = Libretro::Options::GetCached<int>(
-      Libretro::Options::gfx_settings::EFB_SCALE);
+    const int scale = Libretro::Options::GetCached<int>(Libretro::Options::gfx_settings::EFB_SCALE, 1);
+    Config::SetCurrent(Config::GFX_EFB_SCALE, (scale >= 1 && scale <= 6) ? scale : 1);
+    g_Config.iEFBScale = (scale >= 1 && scale <= 6) ? scale : 1;
 
     unsigned cmd = RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO;
     if (Libretro::Video::hw_render.context_type == RETRO_HW_CONTEXT_D3D11 ||
@@ -402,6 +407,15 @@ void retro_run(void)
 
   if (flags.any())
     Libretro::Input::ResetControllers(flags);
+
+  // Live frontend graphics options are consumed between retro frames,
+  // using the same Config current layer as the existing aspect control.
+  if (Libretro::Options::IsUpdated(Libretro::Options::gfx_settings::SHADER_COMPILATION_MODE))
+  {
+    const int mode = Libretro::Options::GetCached<int>(Libretro::Options::gfx_settings::SHADER_COMPILATION_MODE, 0);
+    Config::SetCurrent(Config::GFX_SHADER_COMPILATION_MODE,
+        static_cast<ShaderCompilationMode>((mode == 2) ? 2 : 0));
+  }
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_settings::ASPECT_RATIO))
     Config::SetCurrent(
@@ -484,12 +498,12 @@ void retro_run(void)
 
   if (system.IsDualCoreMode())
   {
-    Core::DoFrameStep(system);
-    system.GetFifo().RunGpuLoop();
+    { CONTINUO_CORE_SCOPE(FrameStep); Core::DoFrameStep(system); }
+    { CONTINUO_CORE_SCOPE(GpuLoop); system.GetFifo().RunGpuLoop(); }
   }
   else
   {
-    system.GetCPU().RunSingleFrame();
+    { CONTINUO_CORE_SCOPE(FrameStep); system.GetCPU().RunSingleFrame(); }
   }
 
   RETRO_PERFORMANCE_STOP(dolphin_main_func);
@@ -499,7 +513,7 @@ void retro_run(void)
     auto* libretro_stream = static_cast<Libretro::Audio::Stream*>(sound_stream);
     if (libretro_stream)
     {
-      libretro_stream->PushAudioForFrame();
+      { CONTINUO_CORE_SCOPE(AudioFrame); libretro_stream->PushAudioForFrame(); }
     }
   }
 
@@ -596,6 +610,85 @@ unsigned retro_api_version()
 {
   return RETRO_API_VERSION;
 }
+
+extern "C" RETRO_API size_t tvc_bridge_write(const void* data, size_t size)
+{
+  return ExpansionInterface::TVCBridge::HostWrite(static_cast<const u8*>(data), size);
+}
+
+extern "C" RETRO_API size_t tvc_bridge_read(void* data, size_t size)
+{
+  return ExpansionInterface::TVCBridge::HostRead(static_cast<u8*>(data), size);
+}
+
+extern "C" RETRO_API size_t tvc_bridge_pending_to_game()
+{
+  return ExpansionInterface::TVCBridge::PendingToGame();
+}
+
+extern "C" RETRO_API size_t tvc_bridge_pending_from_game()
+{
+  return ExpansionInterface::TVCBridge::PendingFromGame();
+}
+
+extern "C" RETRO_API void tvc_bridge_reset()
+{
+  ExpansionInterface::TVCBridge::Reset();
+}
+
+extern "C" RETRO_API size_t tvc_rollback_serialize_size()
+{
+  size_t size = 0;
+  Core::RunOnCPUThread(Core::System::GetInstance(), [&] {
+    PointerWrap p(reinterpret_cast<u8**>(&size), sizeof(size_t), PointerWrap::Mode::Measure);
+    State::DoState(Core::System::GetInstance(), p, false);
+  }, true);
+  return size;
+}
+
+extern "C" RETRO_API bool tvc_rollback_serialize(void* data, size_t size)
+{
+  bool valid = false;
+  Core::RunOnCPUThread(Core::System::GetInstance(), [&] {
+    PointerWrap p(reinterpret_cast<u8**>(&data), size, PointerWrap::Mode::Write);
+    State::DoState(Core::System::GetInstance(), p, false);
+    valid = p.IsWriteMode();
+  }, true);
+  return valid;
+}
+
+extern "C" RETRO_API bool tvc_rollback_unserialize(const void* data, size_t size,
+                                                    const void* mem1, size_t mem1_size,
+                                                    const void* mem2, size_t mem2_size)
+{
+  auto& memory = Core::System::GetInstance().GetMemory();
+  if (!mem1 || !mem2 || mem1_size != memory.GetRamSizeReal() ||
+      mem2_size != memory.GetExRamSizeReal())
+    return false;
+
+  bool valid = false;
+  void* cursor = const_cast<void*>(data);
+  Core::RunOnCPUThread(Core::System::GetInstance(), [&] {
+    PointerWrap p(reinterpret_cast<u8**>(&cursor), size, PointerWrap::Mode::Read);
+    State::DoState(Core::System::GetInstance(), p, false, mem1, mem2);
+    valid = p.IsReadMode();
+  }, true);
+  return valid;
+}
+
+extern "C" RETRO_API size_t tvc_rollback_memory_size(unsigned region)
+{
+  auto& memory = Core::System::GetInstance().GetMemory();
+  return region == 0 ? memory.GetRamSizeReal() :
+         region == 1 ? memory.GetExRamSizeReal() : 0;
+}
+
+extern "C" RETRO_API void* tvc_rollback_memory_data(unsigned region)
+{
+  auto& memory = Core::System::GetInstance().GetMemory();
+  return region == 0 ? memory.GetRAM() : region == 1 ? memory.GetEXRAM() : nullptr;
+}
+
 
 size_t retro_get_memory_size(unsigned id)
 {
@@ -714,3 +807,35 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
   }, true);
 }
 } // extern "C"
+
+#include "ContinuoGuestPatch.inl"
+
+#include "ContinuoDiscTraceExports.inl"
+
+#ifdef _WIN32
+#define CONTINUO_PERF_EXPORT extern "C" __declspec(dllexport)
+#else
+#define CONTINUO_PERF_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
+CONTINUO_PERF_EXPORT unsigned RETRO_CALLCONV continuo_core_perf_snapshot_v1(std::uint64_t* out,unsigned size)
+{
+  return ContinuoCorePerf::Snapshot(out,size);
+}
+CONTINUO_PERF_EXPORT unsigned RETRO_CALLCONV continuo_core_deep_snapshot_v1(std::uint64_t* out,unsigned size)
+{
+  return ContinuoCoreDeepPerf::Snapshot(out,size);
+}
+CONTINUO_PERF_EXPORT void RETRO_CALLCONV continuo_core_perf_info_v1(char* out,unsigned size)
+{
+  if(!out||!size)return;
+  auto& system=Core::System::GetInstance();
+  const auto cpu=Libretro::Options::CPUCoreToString(Config::Get(Config::MAIN_CPU_CORE));
+  std::snprintf(out,size,"CPU=%s; dual_core=%s; fastmem=%s; shader_mode=%d; throttle_disabled=%s; efb_scale=%d; aspect_mode=%d",
+      cpu.c_str(),system.IsDualCoreMode()?"YES":"NO",Config::Get(Config::MAIN_FASTMEM)?"YES":"NO",
+      static_cast<int>(Config::Get(Config::GFX_SHADER_COMPILATION_MODE)),Core::GetIsThrottlerTempDisabled()?"YES":"NO",Config::Get(Config::GFX_EFB_SCALE),static_cast<int>(Config::Get(Config::GFX_ASPECT_RATIO)));
+}
+
+CONTINUO_PERF_EXPORT unsigned RETRO_CALLCONV continuo_live_graphics_v1() {return 1;}
+CONTINUO_PERF_EXPORT void RETRO_CALLCONV continuo_set_shader_progress_v1(ContinuoCorePerf::ShaderProgressCallback callback) {
+    ContinuoCorePerf::shader_progress_callback.store(callback,std::memory_order_release);
+}

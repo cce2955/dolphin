@@ -15,6 +15,7 @@
 #include "Core/HW/EXI/EXI_DeviceIPL.h"
 #include "Core/HW/EXI/EXI_DeviceMemoryCard.h"
 #include "Core/HW/EXI/EXI_DeviceModem.h"
+#include "Core/HW/EXI/EXI_DeviceTVC.h"
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
 
@@ -167,6 +168,10 @@ std::unique_ptr<IEXIDevice> EXIDevice_Create(Core::System& system, const EXIDevi
 
   case EXIDeviceType::ModemTapServer:
     result = std::make_unique<CEXIModem>(system, ModemDeviceType::TAPSERVER);
+    break;
+
+  case EXIDeviceType::TVCRollback:
+    result = std::make_unique<CEXITVCRollback>(system);
     break;
 
   case EXIDeviceType::Gecko:

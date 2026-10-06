@@ -440,6 +440,21 @@ void AXWiiUCode::ProcessPBList(u32 pb_addr)
   AXPBWii pb;
 
   auto& memory = m_dsphle->GetSystem().GetMemory();
+  // Continuo PCM: discover a unique stereo voice pair before replacing samples.
+  ContinuoMusicMixer::BeginBlock();
+  u32 continuo_probe = pb_addr;
+  unsigned continuo_voices = 0;
+  while (continuo_probe && continuo_voices++ < 1024)
+  {
+    AXPBWii candidate;
+    ReadPB(memory, continuo_probe, candidate);
+    ContinuoMusicMixer::Observe(continuo_probe, candidate.running, candidate.adpcm.coefs,
+        candidate.audio_addr.sample_format, candidate.mixer.main_left.volume,
+        candidate.mixer.main_right.volume);
+    continuo_probe = HILO_TO_32(candidate.next_pb);
+  }
+  if (continuo_probe) ContinuoMusicMixer::Current().ambiguous = true;
+  ContinuoMusicMixer::EndDiscovery();
   while (pb_addr)
   {
     AXBuffers buffers = {{m_samples_main_left, m_samples_main_right, m_samples_main_surround,
@@ -459,6 +474,7 @@ void AXWiiUCode::ProcessPBList(u32 pb_addr)
       for (int curr_ms = 0; curr_ms < 3; ++curr_ms)
       {
         ApplyUpdatesForMs(curr_ms, pb, pb.updates.num_updates, updates);
+        ContinuoMusicMixer::SetVoice(pb_addr, curr_ms * spms);
         ProcessVoice(static_cast<HLEAccelerator*>(m_accelerator.get()), pb, buffers, spms,
                      ConvertMixerControl(HILO_TO_32(pb.mixer_control)),
                      m_coeffs_checksum ? m_coeffs.data() : nullptr, m_new_filter);
@@ -472,6 +488,7 @@ void AXWiiUCode::ProcessPBList(u32 pb_addr)
     }
     else
     {
+      ContinuoMusicMixer::SetVoice(pb_addr, 0);
       ProcessVoice(static_cast<HLEAccelerator*>(m_accelerator.get()), pb, buffers, 96,
                    ConvertMixerControl(HILO_TO_32(pb.mixer_control)),
                    m_coeffs_checksum ? m_coeffs.data() : nullptr, m_new_filter);
@@ -480,6 +497,7 @@ void AXWiiUCode::ProcessPBList(u32 pb_addr)
     WritePB(memory, pb_addr, pb);
     pb_addr = HILO_TO_32(pb.next_pb);
   }
+  ContinuoMusicMixer::EndBlock();
 }
 
 void AXWiiUCode::MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr, u16 volume)

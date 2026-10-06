@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCorePerf.h"
 // Copyright 2008 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -155,7 +156,7 @@ void CPUManager::Run()
       }
 
       // Enter a fast runloop
-      power_pc.RunLoop();
+      { CONTINUO_CORE_SCOPE(CpuRun); power_pc.RunLoop(); }
 
       state_lock.lock();
       m_state_cpu_thread_active = false;
@@ -243,7 +244,7 @@ void CPUManager::RunSingleFrame()
 
   SetState(system, Core::State::Running, false, true);
 
-  power_pc.RunLoop();
+  { CONTINUO_CORE_SCOPE(CpuRun); power_pc.RunLoop(); }
 
   AsyncRequests::GetInstance()->PullEvents();
 }

@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCoreDeepPerf.h"
 // Copyright 2010 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -229,6 +230,7 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
 void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_indices,
                                  u32* out_base_vertex, u32* out_base_index)
 {
+  CONTINUO_DEEP_SCOPE(BufferUpload);
   D3D11_MAPPED_SUBRESOURCE map;
 
   u32 vertexBufferSize = Common::AlignUp(num_vertices * vertex_stride, sizeof(u16));

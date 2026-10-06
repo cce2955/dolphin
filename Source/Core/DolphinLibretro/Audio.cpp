@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCorePerf.h"
 #include <libretro.h>
 #include "Audio.h"
 #include "Common/Logging/Log.h"
@@ -169,20 +170,20 @@ void Stream::Update(unsigned int num_samples)
   pending = 0; // consume all
 
   // First push the minimum threshold block
-  m_mixer->Mix(m_buffer, MIN_SAMPLES);
+  { CONTINUO_CORE_SCOPE(AudioMix); m_mixer->Mix(m_buffer, MIN_SAMPLES); }
   batch_cb(m_buffer, MIN_SAMPLES);
   avail -= MIN_SAMPLES;
 
   // Then push any remaining in MAX_SAMPLES chunks
   while (avail > MAX_SAMPLES)
   {
-    m_mixer->Mix(m_buffer, MAX_SAMPLES);
+    { CONTINUO_CORE_SCOPE(AudioMix); m_mixer->Mix(m_buffer, MAX_SAMPLES); }
     batch_cb(m_buffer, MAX_SAMPLES);
     avail -= MAX_SAMPLES;
   }
   if (avail)
   {
-    m_mixer->Mix(m_buffer, avail);
+    { CONTINUO_CORE_SCOPE(AudioMix); m_mixer->Mix(m_buffer, avail); }
     batch_cb(m_buffer, avail);
   }
 }
@@ -201,14 +202,14 @@ void Stream::MixAndPush(unsigned int num_samples)
   // Then push any remaining in MAX_SAMPLES chunk
   while (avail >= MAX_SAMPLES)
   {
-    m_mixer->Mix(m_buffer, MAX_SAMPLES);
+    { CONTINUO_CORE_SCOPE(AudioMix); m_mixer->Mix(m_buffer, MAX_SAMPLES); }
     batch_cb(m_buffer, MAX_SAMPLES);
     avail -= MAX_SAMPLES;
   }
   
   if (avail >= MIN_SAMPLES)
   {
-    m_mixer->Mix(m_buffer, avail);
+    { CONTINUO_CORE_SCOPE(AudioMix); m_mixer->Mix(m_buffer, avail); }
     batch_cb(m_buffer, avail);
   }
   else if (avail > 0)
@@ -283,7 +284,7 @@ void Stream::ProcessCallBack()
 
     // Use frame time to decide how much to push
     unsigned to_mix = GetSamplesForFrame(m_sample_rate);
-    m_mixer->Mix(m_buffer, to_mix);
+    { CONTINUO_CORE_SCOPE(AudioMix); m_mixer->Mix(m_buffer, to_mix); }
     batch_cb(m_buffer, to_mix);
 
     return;
@@ -292,7 +293,7 @@ void Stream::ProcessCallBack()
   unsigned to_mix = GetSamplesForFrame(m_sample_rate);
   // Clamp to sane range
   to_mix = std::clamp(to_mix, MIN_SAMPLES, MAX_SAMPLES);
-  m_mixer->Mix(m_buffer, to_mix);
+  { CONTINUO_CORE_SCOPE(AudioMix); m_mixer->Mix(m_buffer, to_mix); }
   batch_cb(m_buffer, to_mix);
 }
 } // namespace Audio

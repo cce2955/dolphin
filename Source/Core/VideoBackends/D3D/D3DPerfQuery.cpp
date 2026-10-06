@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCoreDeepPerf.h"
 // Copyright 2012 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -102,6 +103,7 @@ u32 PerfQuery::GetQueryResult(PerfQueryType type)
 
 void PerfQuery::FlushOne()
 {
+  CONTINUO_DEEP_SCOPE(QueryWait);
   auto& entry = m_query_buffer[m_query_read_pos];
 
   UINT64 result = 0;

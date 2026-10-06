@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCorePerf.h"
 // Copyright 2018 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -126,6 +127,7 @@ const AbstractPipeline* ShaderCache::GetPipelineForUid(const GXPipelineUid& uid)
   if (it != m_gx_pipeline_cache.end() && !it->second.second)
     return it->second.first.get();
 
+  CONTINUO_CORE_SCOPE(PipelineBuild);
   const bool exists_in_cache = it != m_gx_pipeline_cache.end();
   std::unique_ptr<AbstractPipeline> pipeline;
   std::optional<AbstractPipelineConfig> pipeline_config = GetGXPipelineConfig(uid);
@@ -159,6 +161,7 @@ const AbstractPipeline* ShaderCache::GetUberPipelineForUid(const GXUberPipelineU
   if (it != m_gx_uber_pipeline_cache.end() && !it->second.second)
     return it->second.first.get();
 
+  CONTINUO_CORE_SCOPE(PipelineBuild);
   std::unique_ptr<AbstractPipeline> pipeline;
   std::optional<AbstractPipelineConfig> pipeline_config = GetGXPipelineConfig(uid);
   if (pipeline_config)
@@ -168,9 +171,16 @@ const AbstractPipeline* ShaderCache::GetUberPipelineForUid(const GXUberPipelineU
 
 void ShaderCache::WaitForAsyncCompiler()
 {
+  CONTINUO_CORE_SCOPE(WaitForShaders);
   bool running = true;
+#ifdef __LIBRETRO__
+  ContinuoCorePerf::ShaderProgress(0,0,1);
+#endif
 
   constexpr auto update_ui_progress = [](size_t completed, size_t total) {
+#ifdef __LIBRETRO__
+    ContinuoCorePerf::ShaderProgress(completed,total,1);
+#endif
     const float center_x = ImGui::GetIO().DisplaySize.x * 0.5f;
     const float center_y = ImGui::GetIO().DisplaySize.y * 0.5f;
     const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
@@ -201,6 +211,9 @@ void ShaderCache::WaitForAsyncCompiler()
     m_async_shader_compiler->RetrieveWorkItems();
   }
 
+#ifdef __LIBRETRO__
+  ContinuoCorePerf::ShaderProgress(0,0,0);
+#endif
   // An extra Present to clear the screen
   g_presenter->Present();
 }
@@ -438,6 +451,7 @@ void ShaderCache::CompileMissingPipelines()
 
 std::unique_ptr<AbstractShader> ShaderCache::CompileVertexShader(const VertexShaderUid& uid) const
 {
+  CONTINUO_CORE_SCOPE(ShaderBuild);
   const ShaderCode source_code =
       GenerateVertexShaderCode(m_api_type, m_host_config, uid.GetUidData(), {});
   return g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer());
@@ -446,6 +460,7 @@ std::unique_ptr<AbstractShader> ShaderCache::CompileVertexShader(const VertexSha
 std::unique_ptr<AbstractShader>
 ShaderCache::CompileVertexUberShader(const UberShader::VertexShaderUid& uid) const
 {
+  CONTINUO_CORE_SCOPE(ShaderBuild);
   const ShaderCode source_code =
       UberShader::GenVertexShader(m_api_type, m_host_config, uid.GetUidData());
   return g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer(), nullptr,
@@ -454,6 +469,7 @@ ShaderCache::CompileVertexUberShader(const UberShader::VertexShaderUid& uid) con
 
 std::unique_ptr<AbstractShader> ShaderCache::CompilePixelShader(const PixelShaderUid& uid) const
 {
+  CONTINUO_CORE_SCOPE(ShaderBuild);
   const ShaderCode source_code =
       GeneratePixelShaderCode(m_api_type, m_host_config, uid.GetUidData(), {});
   return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer());
@@ -462,6 +478,7 @@ std::unique_ptr<AbstractShader> ShaderCache::CompilePixelShader(const PixelShade
 std::unique_ptr<AbstractShader>
 ShaderCache::CompilePixelUberShader(const UberShader::PixelShaderUid& uid) const
 {
+  CONTINUO_CORE_SCOPE(ShaderBuild);
   const ShaderCode source_code =
       UberShader::GenPixelShader(m_api_type, m_host_config, uid.GetUidData());
   return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer(), nullptr,

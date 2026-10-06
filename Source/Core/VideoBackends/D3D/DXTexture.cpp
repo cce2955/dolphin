@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCoreDeepPerf.h"
 // Copyright 2017 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -315,6 +316,7 @@ void DXStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& src_rect, A
 
 bool DXStagingTexture::Map()
 {
+  CONTINUO_DEEP_SCOPE(StagingMap);
   if (m_map_pointer)
     return true;
 

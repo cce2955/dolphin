@@ -306,9 +306,23 @@ void StateManager::SyncComputeBindings()
 #ifdef __LIBRETRO__
 void StateManager::Restore()
 {
-  D3D::context->PSSetConstantBuffers(0, m_pending.pixelConstants[1] ? 2 : 1,
-                                     m_pending.pixelConstants.data());
+  // DX11SwapChain::Present explicitly unbinds the render target to expose its
+  // SRV to the frontend. Restore the framebuffer before textures (hazards),
+  // rather than claiming m_current is restored while the actual RTV is null.
+  if (m_pending.framebuffer)
+  {
+    m_dirtyFlags.set(DirtyFlag_Framebuffer);
+    Apply();
+  }
+  else
+  {
+    D3D::context->OMSetRenderTargets(0, nullptr, nullptr);
+  }
+  D3D::context->PSSetConstantBuffers(0, 2, m_pending.pixelConstants.data());
+  D3D::context->PSSetConstantBuffers(2, 1, &m_pending.customConstants);
   D3D::context->VSSetConstantBuffers(0, 1, &m_pending.vertexConstants);
+  D3D::context->VSSetConstantBuffers(1, 1, &m_pending.vertexConstants);
+  D3D::context->VSSetConstantBuffers(2, 1, &m_pending.customConstants);
   D3D::context->GSSetConstantBuffers(0, 1, &m_pending.geometryConstants);
   D3D::context->IASetVertexBuffers(0, 1, &m_pending.vertexBuffer, &m_pending.vertexBufferStride,
                                    &m_pending.vertexBufferOffset);
@@ -447,10 +461,25 @@ ID3D11BlendState* StateCache::Get(BlendingState state)
        use_dual_source ? D3D11_BLEND_INV_SRC1_ALPHA : D3D11_BLEND_INV_SRC_ALPHA,
        D3D11_BLEND_DEST_ALPHA, D3D11_BLEND_INV_DEST_ALPHA}};
 
+  // Logic-op approximation can copy RGB factors into the alpha fields.
+  // D3D11 rejects *_COLOR factors for alpha blending. Use their alpha
+  // equivalents without changing RGB blending or dual-source selection.
+  const std::array<D3D11_BLEND, 8> src_alpha_factors = {
+      {D3D11_BLEND_ZERO, D3D11_BLEND_ONE, D3D11_BLEND_DEST_ALPHA, D3D11_BLEND_INV_DEST_ALPHA,
+       use_dual_source ? D3D11_BLEND_SRC1_ALPHA : D3D11_BLEND_SRC_ALPHA,
+       use_dual_source ? D3D11_BLEND_INV_SRC1_ALPHA : D3D11_BLEND_INV_SRC_ALPHA,
+       D3D11_BLEND_DEST_ALPHA, D3D11_BLEND_INV_DEST_ALPHA}};
+
+  const std::array<D3D11_BLEND, 8> dst_alpha_factors = {
+      {D3D11_BLEND_ZERO, D3D11_BLEND_ONE, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA,
+       use_dual_source ? D3D11_BLEND_SRC1_ALPHA : D3D11_BLEND_SRC_ALPHA,
+       use_dual_source ? D3D11_BLEND_INV_SRC1_ALPHA : D3D11_BLEND_INV_SRC_ALPHA,
+       D3D11_BLEND_DEST_ALPHA, D3D11_BLEND_INV_DEST_ALPHA}};
+
   tdesc.SrcBlend = src_factors[u32(state.src_factor.Value())];
-  tdesc.SrcBlendAlpha = src_factors[u32(state.src_factor_alpha.Value())];
+  tdesc.SrcBlendAlpha = src_alpha_factors[u32(state.src_factor_alpha.Value())];
   tdesc.DestBlend = dst_factors[u32(state.dst_factor.Value())];
-  tdesc.DestBlendAlpha = dst_factors[u32(state.dst_factor_alpha.Value())];
+  tdesc.DestBlendAlpha = dst_alpha_factors[u32(state.dst_factor_alpha.Value())];
   tdesc.BlendOp = state.subtract ? D3D11_BLEND_OP_REV_SUBTRACT : D3D11_BLEND_OP_ADD;
   tdesc.BlendOpAlpha = state.subtract_alpha ? D3D11_BLEND_OP_REV_SUBTRACT : D3D11_BLEND_OP_ADD;
 

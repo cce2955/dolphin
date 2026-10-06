@@ -1,3 +1,4 @@
+#include "DolphinLibretro/ContinuoCoreDeepPerf.h"
 // Copyright 2010 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -229,6 +230,7 @@ std::tuple<u32, u32> FramebufferManager::CalculateTargetSize(int efb_scale)
 
 bool FramebufferManager::CreateEFBFramebuffer(int efb_scale)
 {
+  CONTINUO_DEEP_SCOPE(TargetResize);
   auto [width, height] = CalculateTargetSize(efb_scale);
 
   const TextureConfig efb_color_texture_config = GetEFBColorTextureConfig(width, height);
@@ -292,6 +294,11 @@ bool FramebufferManager::CreateEFBFramebuffer(int efb_scale)
   // Clear the renderable textures out.
   g_gfx->SetAndClearFramebuffer(m_efb_framebuffer.get(), {{0.0f, 0.0f, 0.0f, 0.0f}},
                                 g_backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f);
+
+#ifdef __LIBRETRO__
+  INFO_LOG_FMT(VIDEO, "CONTINUO EFB ALLOCATION: requested_scale={}; actual_scale={}; size={}x{}",
+               efb_scale, m_efb_scale, width, height);
+#endif
 
   // Pixel Shader uses EFB scale as a constant, dirty that in case it changed
   Core::System::GetInstance().GetPixelShaderManager().Dirty();
@@ -785,6 +792,7 @@ void FramebufferManager::DestroyReadbackFramebuffer()
 
 void FramebufferManager::PopulateEFBCache(bool depth, u32 tile_index, bool async)
 {
+  CONTINUO_DEEP_SCOPE(EfbReadback);
   FlushEFBPokes();
   g_vertex_manager->OnCPUEFBAccess();
 

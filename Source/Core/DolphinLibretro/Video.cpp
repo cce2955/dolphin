@@ -71,6 +71,25 @@ static Common::DynamicLibrary d3d11_library;
 static Common::DynamicLibrary d3d12_library;
 #endif
 
+// TVC-Windows supplies the actual Vulkan frontend drawable size.
+// Stock libretro Dolphin otherwise uses an EFB-sized fake surface
+// (640x528 for TvC at 1x), which can cause Dolphin's Presenter to
+// crop widescreen content before the frontend receives set_image().
+static unsigned g_tvc_frontend_surface_width = 0;
+static unsigned g_tvc_frontend_surface_height = 0;
+
+#ifdef _WIN32
+extern "C" __declspec(dllexport)
+#else
+extern "C" __attribute__((visibility("default")))
+#endif
+void continuo_set_vulkan_surface_size_v1(unsigned width, unsigned height)
+{
+  g_tvc_frontend_surface_width = width;
+  g_tvc_frontend_surface_height = height;
+  INFO_LOG_FMT(VIDEO, "TVC frontend Vulkan surface override: {}x{}", width, height);
+}
+
 int GetAdjustedBaseHeight()
 {
   const bool crop_overscan = Libretro::Options::GetCached<bool>(
@@ -286,8 +305,19 @@ void ContextReset(void)
 
     int efbScale = Libretro::Options::GetCached<int>(
       Libretro::Options::gfx_settings::EFB_SCALE, 1);
-    Vk::SetSurfaceSize(EFB_WIDTH * efbScale,
-                       GetAdjustedBaseHeight() * efbScale);
+
+    const unsigned default_width = EFB_WIDTH * efbScale;
+    const unsigned default_height = GetAdjustedBaseHeight() * efbScale;
+    const unsigned surface_width =
+      g_tvc_frontend_surface_width ? g_tvc_frontend_surface_width : default_width;
+    const unsigned surface_height =
+      g_tvc_frontend_surface_height ? g_tvc_frontend_surface_height : default_height;
+
+    INFO_LOG_FMT(VIDEO,
+                 "Vulkan fake surface: {}x{} (EFB default {}x{})",
+                 surface_width, surface_height, default_width, default_height);
+
+    Vk::SetSurfaceSize(surface_width, surface_height);
   }
 #endif
 

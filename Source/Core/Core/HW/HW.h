@@ -14,5 +14,6 @@ namespace HW
 {
 void Init(Core::System& system, const Sram* override_sram);
 void Shutdown(Core::System& system);
-void DoState(Core::System& system, PointerWrap& p);
+void DoState(Core::System& system, PointerWrap& p, bool include_large_memory = true,
+             const void* external_ram = nullptr, const void* external_exram = nullptr);
 }  // namespace HW

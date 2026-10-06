@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/HW/DVD/DVDThread.h"
+#include "Core/HW/DVD/ContinuoDiscTrace.h"
+#include "Core/PowerPC/PowerPC.h"
+#include "DiscIO/Filesystem.h"
+#include "Core/HW/DVD/ContinuoDiscOverride.h"
 
 #include <map>
 #include <memory>
@@ -214,6 +218,40 @@ void DVDThread::StartReadInternal(bool copy_to_ram, u32 output_address, u64 dvd_
   request.time_started_ticks = core_timing.GetTicks();
   request.realtime_started_us = Common::Timer::NowUs();
 
+  // Continuo disc trace: submit (diagnostics only).
+  if (ContinuoDiscTrace::Enabled())
+  {
+    DiscReadTraceEvent event;
+    event.requestId = request.id;
+    event.ticks = request.time_started_ticks;
+    event.offset = dvd_offset;
+    event.partition = PartitionOffsetToRawOffset(0, partition);
+    event.length = length;
+    event.outputAddress = output_address;
+    event.reserved = copy_to_ram ? 1 : 0;
+    const auto& ppc = m_system.GetPPCState();
+    event.pc = ppc.pc;
+    event.lr = LR(ppc);
+    event.sp = ppc.gpr[1];
+    auto& memory = m_system.GetMemory();
+    auto stack = event.sp;
+    const auto stack_word = [&](u32 address) {
+      return !(address & 3) && ((address >= 0x80000000 && address <= 0x817ffff8) ||
+             (address >= 0x90000000 && address <= 0x93fffff8)) &&
+             memory.GetPointerForRange(address, 8);
+    };
+    for (unsigned i = 0; i < 8 && stack_word(stack); ++i)
+    {
+      const u32 parent = memory.Read_U32(stack);
+      if (parent <= stack || parent - stack > 0x100000 || !stack_word(parent))
+        break;
+      event.callers[event.callerCount++] = memory.Read_U32(parent + 4);
+      stack = parent;
+    }
+    ContinuoDiscTrace::Submit(event);
+  }
+  // Continuo disc trace: submit end.
+
   m_dvd_thread.Push(std::move(request));
   core_timing.ScheduleEvent(ticks_until_completion, m_finish_read, id);
 }
@@ -284,6 +322,10 @@ void DVDThread::FinishRead(u64 id, s64 cycles_late)
     {
       auto& memory = m_system.GetMemory();
       memory.CopyToEmu(request.output_address, buffer.data(), request.length);
+      // Continuo: refresh queued SRT metadata at CPU delivery.
+      if (auto* delivered = memory.GetPointerForRange(request.output_address, request.length))
+        ContinuoDiscOverride::RefreshDeliveredMetadata(*m_disc, request.partition,
+            request.dvd_offset, {delivered, request.length});
     }
 
     interrupt = DVD::DIInterruptType::TCINT;
@@ -295,6 +337,7 @@ void DVDThread::FinishRead(u64 id, s64 cycles_late)
 
 void DVDThread::ProcessReadRequest(ReadRequest&& request)
 {
+  const auto continuo_trace_request = ContinuoDiscTrace::Take(request.id, request.time_started_ticks);
   m_file_logger.Log(*m_disc, request.partition, request.dvd_offset);
 
   std::vector<u8> buffer(request.length);
@@ -302,6 +345,26 @@ void DVDThread::ProcessReadRequest(ReadRequest&& request)
     buffer.resize(0);
 
   request.realtime_done_us = Common::Timer::NowUs();
+  ContinuoDiscOverride::Apply(*m_disc, request.partition, request.dvd_offset, buffer);
+
+  // Continuo disc trace: completed read (diagnostics only).
+  if (continuo_trace_request)
+  {
+    std::string path = "[disc metadata/unmapped]";
+    u64 file_offset = 0, file_size = 0;
+    if (const auto* filesystem = m_disc->GetFileSystem(request.partition))
+    {
+      if (const auto file = filesystem->FindFileInfo(request.dvd_offset))
+      {
+        path = file->GetPath();
+        file_offset = request.dvd_offset - file->GetOffset();
+        file_size = file->GetSize();
+      }
+    }
+    ContinuoDiscTrace::Complete(*continuo_trace_request, path.c_str(), file_offset, file_size,
+                              buffer.size() == request.length, buffer.data(), buffer.size());
+  }
+  // Continuo disc trace: completed read end.
 
   m_result_queue.Push(ReadResult(std::move(request), std::move(buffer)));
 }

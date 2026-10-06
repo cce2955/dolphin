@@ -620,6 +620,7 @@ static struct retro_core_option_v2_definition option_defs[] = {
 #endif
         { "13",  "Modem TapServer" },   // EXIDeviceType::ModemTapServer
         { "6",   "Baseboard" },         // EXIDeviceType::Baseboard
+        { "15",  "TVC Rollback Bridge" }, // EXIDeviceType::TVCRollback
         { nullptr, nullptr }
     },
     "255" // default: None
