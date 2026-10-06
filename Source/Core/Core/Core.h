@@ -172,6 +172,7 @@ using StateChangedCallbackFunc = std::function<void(Core::State)>;
 void NotifyStateChanged(Core::State state);
 
 void UpdateWantDeterminism(Core::System& system, bool initial = false);
+void SetForceDeterminism(bool force);
 
 // Queue an arbitrary function to asynchronously run once on the Host thread later.
 // Threadsafe. Can be called by any thread, including the Host itself.

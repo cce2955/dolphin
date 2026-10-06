@@ -33,6 +33,10 @@
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoBackendBase.h"
 
+#ifdef __LIBRETRO__
+bool TVCRollbackStateModeEnabled();
+#endif
+
 namespace Fifo
 {
 static constexpr int GPU_TIME_SLOT_SIZE = 1000;
@@ -53,7 +57,21 @@ void FifoManager::RefreshConfig()
 
 void FifoManager::DoState(PointerWrap& p)
 {
-  p.DoArray(m_video_buffer, FIFO_SIZE);
+#ifdef __LIBRETRO__
+  if (TVCRollbackStateModeEnabled())
+  {
+    // Single-core rollback snapshots are taken at a completed frame boundary. An empty FIFO has
+    // no live command bytes, so storing the entire 2 MiB backing buffer only adds copy cost.
+    bool buffer_empty = m_video_buffer_write_ptr == m_video_buffer_read_ptr;
+    p.Do(buffer_empty);
+    if (!buffer_empty)
+      p.DoArray(m_video_buffer, FIFO_SIZE);
+  }
+  else
+#endif
+  {
+    p.DoArray(m_video_buffer, FIFO_SIZE);
+  }
   u8* write_ptr = m_video_buffer_write_ptr;
   p.DoPointer(write_ptr, m_video_buffer);
   m_video_buffer_write_ptr = write_ptr;

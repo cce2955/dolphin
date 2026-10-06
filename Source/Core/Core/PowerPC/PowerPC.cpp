@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstring>
 
@@ -20,6 +21,7 @@
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/CPU.h"
+#include "Core/HW/Memmap.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/Host.h"
 #include "Core/PowerPC/CPUCoreBase.h"
@@ -30,8 +32,49 @@
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/System.h"
 
+#ifdef __LIBRETRO__
+bool TVCRollbackStateModeEnabled();
+#endif
+
 namespace PowerPC
 {
+static std::atomic<u64> s_tvc_battle_boundary_count{0};
+static std::array<u8, 24> s_tvc_rollback_pad_status{};
+static bool s_tvc_rollback_input_enabled = false;
+
+void RecordTVCBattleBoundary()
+{
+  s_tvc_battle_boundary_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+u64 GetTVCBattleBoundaryCount()
+{
+  return s_tvc_battle_boundary_count.load(std::memory_order_relaxed);
+}
+
+void SetTVCRollbackInput(const u8* pad_status, size_t size)
+{
+  if (!pad_status || size != s_tvc_rollback_pad_status.size())
+  {
+    s_tvc_rollback_input_enabled = false;
+    return;
+  }
+  std::memcpy(s_tvc_rollback_pad_status.data(), pad_status, size);
+  s_tvc_rollback_input_enabled = true;
+}
+
+void InjectTVCRollbackInput()
+{
+  if (!s_tvc_rollback_input_enabled)
+    return;
+  auto& memory = Core::System::GetInstance().GetMemory();
+  constexpr size_t pad_status_offset = 0x00473C60;
+  if (memory.GetRamSizeReal() < pad_status_offset + s_tvc_rollback_pad_status.size())
+    return;
+  std::memcpy(memory.GetRAM() + pad_status_offset, s_tvc_rollback_pad_status.data(),
+              s_tvc_rollback_pad_status.size());
+}
+
 double PairedSingle::PS0AsDouble() const
 {
   return std::bit_cast<double>(ps0);
@@ -121,8 +164,13 @@ void PowerPCManager::DoState(PointerWrap& p)
     RoundingModeUpdated(m_ppc_state);
     RecalculateAllFeatureFlags(m_ppc_state);
 
-    mmu.IBATUpdated();
-    mmu.DBATUpdated();
+#ifdef __LIBRETRO__
+    if (!TVCRollbackStateModeEnabled())
+#endif
+    {
+      mmu.IBATUpdated();
+      mmu.DBATUpdated();
+    }
   }
   else
   {

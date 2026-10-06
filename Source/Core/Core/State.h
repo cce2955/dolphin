@@ -113,5 +113,6 @@ void SetOnAfterLoadCallback(AfterLoadCallbackFunc callback);
 #ifdef __LIBRETRO__
 void DoState(Core::System& system, PointerWrap& p, bool include_large_memory = true,
              const void* external_ram = nullptr, const void* external_exram = nullptr);
+u64 GetLastRollbackSectionTimeUs(unsigned section);
 #endif
 }  // namespace State

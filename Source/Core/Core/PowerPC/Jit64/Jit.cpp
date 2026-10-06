@@ -1079,6 +1079,23 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
     }
     else
     {
+      if (op.address == 0x8006DBD0)
+      {
+        gpr.Flush();
+        fpr.Flush();
+        ABI_PushRegistersAndAdjustStack({}, 0);
+        ABI_CallFunction(PowerPC::RecordTVCBattleBoundary);
+        ABI_PopRegistersAndAdjustStack({}, 0);
+      }
+      if (op.address == 0x801531B0)
+      {
+        gpr.Flush();
+        fpr.Flush();
+        ABI_PushRegistersAndAdjustStack({}, 0);
+        ABI_CallFunction(PowerPC::InjectTVCRollbackInput);
+        ABI_PopRegistersAndAdjustStack({}, 0);
+      }
+
       auto& cpu = m_system.GetCPU();
       auto& power_pc = m_system.GetPowerPC();
       if (IsDebuggingEnabled() && power_pc.GetBreakPoints().IsAddressBreakPoint(op.address) &&

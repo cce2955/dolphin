@@ -27,6 +27,10 @@
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
 
+#ifdef __LIBRETRO__
+bool TVCRollbackStateModeEnabled();
+#endif
+
 void VideoCommon_DoState(PointerWrap& p)
 {
   bool software = false;
@@ -55,7 +59,10 @@ void VideoCommon_DoState(PointerWrap& p)
   p.DoMarker("XF Memory");
 
   // Texture decoder
-  p.DoArray(s_tex_mem);
+#ifdef __LIBRETRO__
+  if (!TVCRollbackStateModeEnabled())
+#endif
+    p.DoArray(s_tex_mem);
   p.DoMarker("texMem");
 
   // TMEM
