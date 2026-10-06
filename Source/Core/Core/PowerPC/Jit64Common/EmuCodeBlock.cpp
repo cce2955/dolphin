@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/Jit64Common/EmuCodeBlock.h"
+#include "Core/HW/TVCRollbackDirty.h"
 
 #include <functional>
 
@@ -135,6 +136,81 @@ FixupBranch EmuCodeBlock::CheckIfSafeAddress(const OpArg& reg_value, X64Reg reg_
     POP(RSCRATCH);
 
   return J_CC(CC_Z, m_far_code.Enabled() ? Jump::Near : Jump::Short);
+}
+
+void EmuCodeBlock::EmitTVCRollbackDirtyMark(X64Reg reg_addr, s32 offset, int access_size)
+{
+  // Keep normal/offline gameplay cheap: when rollback tracking is inactive this is only a
+  // byte compare and a taken branch, with no scratch-register or stack traffic.
+  PUSH(RSCRATCH);
+  MOV(64, R(RSCRATCH), ImmPtr(Memory::TVCRollbackDirtyEnabledByte()));
+  CMP(8, MatR(RSCRATCH), Imm8(0));
+  POP(RSCRATCH);
+  FixupBranch disabled = J_CC(CC_Z, Jump::Short);
+
+  // Preserve Dolphin's scratch registers. Some callers use either register for the guest
+  // address or value, including the quantized paired-store routines.
+  PUSH(RSCRATCH);
+  PUSH(RSCRATCH_EXTRA);
+
+  X64Reg page_reg;
+  X64Reg base_reg;
+  if (reg_addr == RSCRATCH)
+  {
+    MOV(32, R(RSCRATCH_EXTRA), R(RSCRATCH));
+    page_reg = RSCRATCH_EXTRA;
+    base_reg = RSCRATCH;
+  }
+  else if (reg_addr == RSCRATCH_EXTRA)
+  {
+    MOV(32, R(RSCRATCH), R(RSCRATCH_EXTRA));
+    page_reg = RSCRATCH;
+    base_reg = RSCRATCH_EXTRA;
+  }
+  else
+  {
+    MOV(32, R(RSCRATCH_EXTRA), R(reg_addr));
+    page_reg = RSCRATCH_EXTRA;
+    base_reg = RSCRATCH;
+  }
+
+  if (offset != 0)
+    ADD(32, R(page_reg), Imm32(static_cast<u32>(offset)));
+
+  AND(32, R(page_reg), Imm32(0x3fffffff));
+  SHR(32, R(page_reg), Imm8(12));
+  MOV(64, R(base_reg), ImmPtr(Memory::TVCRollbackDirtyPhysical()));
+  MOV(8, MComplex(base_reg, page_reg, SCALE_1, 0), Imm8(1));
+
+  // Conservatively mark the following page for multi-byte stores. PrepareTVCRollbackDirtyPages
+  // filters false positives with the shadow, while this covers the rare cross-page store without
+  // adding another temporary register to the hot path.
+  if (access_size > 8)
+    MOV(8, MComplex(base_reg, page_reg, SCALE_1, 1), Imm8(1));
+
+  POP(RSCRATCH_EXTRA);
+  POP(RSCRATCH);
+  SetJumpTarget(disabled);
+}
+
+void EmuCodeBlock::EmitTVCRollbackDirtyMarkConst(u32 address, int access_size)
+{
+  const u32 page = (address & 0x3fffffff) >> 12;
+
+  PUSH(RSCRATCH);
+  MOV(64, R(RSCRATCH), ImmPtr(Memory::TVCRollbackDirtyEnabledByte()));
+  CMP(8, MatR(RSCRATCH), Imm8(0));
+  POP(RSCRATCH);
+  FixupBranch disabled = J_CC(CC_Z, Jump::Short);
+
+  PUSH(RSCRATCH);
+  MOV(64, R(RSCRATCH), ImmPtr(Memory::TVCRollbackDirtyPhysical()));
+  MOV(8, MDisp(RSCRATCH, page), Imm8(1));
+  if (access_size > 8)
+    MOV(8, MDisp(RSCRATCH, page + 1), Imm8(1));
+  POP(RSCRATCH);
+
+  SetJumpTarget(disabled);
 }
 
 void EmuCodeBlock::UnsafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int accessSize, s32 offset,
@@ -506,6 +582,7 @@ void EmuCodeBlock::SafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int acces
   if (m_jit.jo.fastmem && !(flags & (SAFE_LOADSTORE_NO_FASTMEM | SAFE_LOADSTORE_NO_UPDATE_PC)) &&
       !force_slow_access)
   {
+    EmitTVCRollbackDirtyMark(reg_addr, offset, accessSize);
     u8* backpatchStart = GetWritableCodePtr();
     MovInfo mov;
     UnsafeWriteRegToReg(reg_value, reg_addr, accessSize, offset, swap, &mov);
@@ -554,6 +631,7 @@ void EmuCodeBlock::SafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int acces
   if (fast_check_address)
   {
     FixupBranch slow = CheckIfSafeAddress(reg_value, reg_addr, registersInUse);
+    EmitTVCRollbackDirtyMark(reg_addr, 0, accessSize);
     UnsafeWriteRegToReg(reg_value, reg_addr, accessSize, 0, swap);
     if (m_far_code.Enabled())
       SwitchToFarCode();
@@ -687,6 +765,8 @@ bool EmuCodeBlock::WriteToConstAddress(int accessSize, OpArg arg, u32 address,
 
 void EmuCodeBlock::WriteToConstRamAddress(int accessSize, OpArg arg, u32 address, bool swap)
 {
+  EmitTVCRollbackDirtyMarkConst(address, accessSize);
+
   X64Reg reg;
   if (arg.IsImm())
   {

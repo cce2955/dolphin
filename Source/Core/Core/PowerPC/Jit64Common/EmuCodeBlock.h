@@ -57,6 +57,8 @@ public:
 
   Gen::FixupBranch CheckIfSafeAddress(const Gen::OpArg& reg_value, Gen::X64Reg reg_addr,
                                       BitSet32 registers_in_use);
+  void EmitTVCRollbackDirtyMark(Gen::X64Reg reg_addr, s32 offset, int access_size);
+  void EmitTVCRollbackDirtyMarkConst(u32 address, int access_size);
   // these return the address of the MOV, for backpatching
   void UnsafeWriteRegToReg(Gen::OpArg reg_value, Gen::X64Reg reg_addr, int accessSize,
                            s32 offset = 0, bool swap = true, Gen::MovInfo* info = nullptr);

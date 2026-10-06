@@ -32,6 +32,7 @@
 #include "Core/HW/DVD/DVDInterface.h"
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/MMIO.h"
+#include "Core/HW/TVCRollbackDirty.h"
 #include "Core/HW/MemoryInterface.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/SI/SI.h"
@@ -673,6 +674,7 @@ void MemoryManager::CopyToEmu(u32 address, const void* data, size_t size)
     PanicAlertFmt("Invalid range in CopyToEmu. {:x} bytes to {:#010x}", size, address);
     return;
   }
+  TVCRollbackMarkDirty(address, size);
   memcpy(pointer, data, size);
 }
 
@@ -687,6 +689,7 @@ void MemoryManager::Memset(u32 address, u8 value, size_t size)
     PanicAlertFmt("Invalid range in Memset. {:x} bytes at {:#010x}", size, address);
     return;
   }
+  TVCRollbackMarkDirty(address, size);
   memset(pointer, value, size);
 }
 

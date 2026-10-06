@@ -16,6 +16,7 @@
 #include "Common/MemArena.h"
 #include "Common/Swap.h"
 #include "Core/PowerPC/MMU.h"
+#include "Core/HW/TVCRollbackDirty.h"
 
 // Global declarations
 class PointerWrap;
@@ -162,6 +163,7 @@ public:
     if (dest == nullptr)
       return;
 
+    TVCRollbackMarkDirty(address, size);
     for (size_t i = 0; i < size / sizeof(T); i++)
       dest[i] = Common::FromBigEndian(data[i]);
   }

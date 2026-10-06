@@ -24,6 +24,7 @@
  */
 
 #include "Core/PowerPC/MMU.h"
+#include "Core/HW/TVCRollbackDirty.h"
 
 #include <algorithm>
 #include <bit>
@@ -2084,6 +2085,7 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
 template <std::unsigned_integral T>
 void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address)
 {
+  Memory::TVCRollbackMarkDirty(address, sizeof(T));
   mmu.Write<T>(var, address);
 }
 template void WriteFromJit<u8>(MMU& mmu, u32 var, u32 address);
@@ -2092,14 +2094,17 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
 template void WriteFromJit<u64>(MMU& mmu, u64 var, u32 address);
 void WriteU16SwapFromJit(MMU& mmu, u32 var, u32 address)
 {
+  Memory::TVCRollbackMarkDirty(address, 2);
   mmu.Write_U16_Swap(var, address);
 }
 void WriteU32SwapFromJit(MMU& mmu, u32 var, u32 address)
 {
+  Memory::TVCRollbackMarkDirty(address, 4);
   mmu.Write_U32_Swap(var, address);
 }
 void WriteU64SwapFromJit(MMU& mmu, u64 var, u32 address)
 {
+  Memory::TVCRollbackMarkDirty(address, 8);
   mmu.Write_U64_Swap(var, address);
 }
 }  // namespace PowerPC

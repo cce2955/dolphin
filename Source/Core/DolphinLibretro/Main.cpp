@@ -33,6 +33,7 @@
 #include "Core/GeckoCodeConfig.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
+#include "Core/HW/TVCRollbackDirty.h"
 #include "Core/HW/EXI/EXI_DeviceTVC.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/VideoInterface.h"
@@ -686,8 +687,14 @@ extern "C" RETRO_API bool tvc_rollback_serialize(void* data, size_t size)
   s_tvc_rollback_serialized_bytes.store(0, std::memory_order_relaxed);
   Core::System& system = Core::System::GetInstance();
   AsyncRequests* ar = AsyncRequests::GetInstance();
-  if (system.IsDualCoreMode())
+  const bool dual_core = system.IsDualCoreMode();
+  const bool fifo_was_running =
+      dual_core && Core::GetState(system) == Core::State::Running;
+  if (dual_core)
+  {
+    system.GetFifo().PauseAndLock();
     ar->SetPassthrough(true);
+  }
   const bool was_cpu = Core::IsCPUThread();
   if (!was_cpu)
     Core::DeclareAsCPUThread();
@@ -706,8 +713,11 @@ extern "C" RETRO_API bool tvc_rollback_serialize(void* data, size_t size)
 
   if (!was_cpu)
     Core::UndeclareAsCPUThread();
-  if (system.IsDualCoreMode())
+  if (dual_core)
+  {
     ar->SetPassthrough(false);
+    system.GetFifo().RestoreState(fifo_was_running);
+  }
   return valid;
 }
 
@@ -738,8 +748,14 @@ extern "C" RETRO_API bool tvc_rollback_unserialize(const void* data, size_t size
     return false;
 
   AsyncRequests* ar = AsyncRequests::GetInstance();
-  if (system.IsDualCoreMode())
+  const bool dual_core = system.IsDualCoreMode();
+  const bool fifo_was_running =
+      dual_core && Core::GetState(system) == Core::State::Running;
+  if (dual_core)
+  {
+    system.GetFifo().PauseAndLock();
     ar->SetPassthrough(true);
+  }
   const bool was_cpu = Core::IsCPUThread();
   if (!was_cpu)
     Core::DeclareAsCPUThread();
@@ -761,8 +777,11 @@ extern "C" RETRO_API bool tvc_rollback_unserialize(const void* data, size_t size
 
   if (!was_cpu)
     Core::UndeclareAsCPUThread();
-  if (system.IsDualCoreMode())
+  if (dual_core)
+  {
     ar->SetPassthrough(false);
+    system.GetFifo().RestoreState(fifo_was_running);
+  }
   return valid;
 }
 
@@ -803,8 +822,14 @@ extern "C" RETRO_API bool tvc_rollback_unserialize_pages(
   }
 
   AsyncRequests* ar = AsyncRequests::GetInstance();
-  if (system.IsDualCoreMode())
+  const bool dual_core = system.IsDualCoreMode();
+  const bool fifo_was_running =
+      dual_core && Core::GetState(system) == Core::State::Running;
+  if (dual_core)
+  {
+    system.GetFifo().PauseAndLock();
     ar->SetPassthrough(true);
+  }
   const bool was_cpu = Core::IsCPUThread();
   if (!was_cpu)
     Core::DeclareAsCPUThread();
@@ -842,12 +867,18 @@ extern "C" RETRO_API bool tvc_rollback_unserialize_pages(
       s_tvc_rollback_dirty_data[region].clear();
       s_tvc_rollback_dirty_prepared[region] = false;
     }
+    // The restore itself bypasses normal guest stores and may also execute state-load helpers.
+    // Start replay from a clean write-tracking epoch.
+    Memory::TVCRollbackDirtyReset();
   }, true);
 
   if (!was_cpu)
     Core::UndeclareAsCPUThread();
-  if (system.IsDualCoreMode())
+  if (dual_core)
+  {
     ar->SetPassthrough(false);
+    system.GetFifo().RestoreState(fifo_was_running);
+  }
   return valid;
 }
 
@@ -885,6 +916,9 @@ extern "C" RETRO_API bool tvc_rollback_dirty_reset()
     s_tvc_rollback_dirty_data[region].clear();
     s_tvc_rollback_dirty_prepared[region] = false;
   }
+
+  Memory::TVCRollbackDirtyReset();
+  Memory::TVCRollbackDirtyEnable(true);
   return true;
 }
 
@@ -894,6 +928,7 @@ static size_t PrepareTVCRollbackDirtyPages(unsigned region)
     return SIZE_MAX;
   if (s_tvc_rollback_dirty_prepared[region])
     return s_tvc_rollback_dirty_pages[region].size();
+
   auto& memory = Core::System::GetInstance().GetMemory();
   u8* source = region == 0 ? memory.GetRAM() :
                region == 1 ? memory.GetEXRAM() : s_tex_mem.data();
@@ -907,31 +942,65 @@ static size_t PrepareTVCRollbackDirtyPages(unsigned region)
   std::vector<u8>& data = s_tvc_rollback_dirty_data[region];
   pages.clear();
   data.clear();
-  // Most of MEM2 remains unchanged during a frame. Compare a large contiguous block first, then
-  // inspect its 4 KiB pages only when the block differs. This preserves exact dirty-page output
-  // while avoiding tens of thousands of small memcmp calls per rollback snapshot.
-  for (size_t block_offset = 0; block_offset < source_size;
-       block_offset += TVC_ROLLBACK_SCAN_BLOCK_SIZE)
+
+  const auto capture_page = [&](size_t page) {
+    const size_t offset = page * TVC_ROLLBACK_PAGE_SIZE;
+    if (offset >= source_size)
+      return;
+    const size_t bytes = std::min(TVC_ROLLBACK_PAGE_SIZE, source_size - offset);
+
+    // The JIT conservatively marks the next page for multi-byte writes. Avoid carrying those
+    // intentional false positives into the rollback snapshot.
+    if (std::memcmp(source + offset, shadow.data() + offset, bytes) == 0)
+      return;
+
+    pages.push_back(static_cast<u32>(page));
+    const size_t data_offset = data.size();
+    data.resize(data_offset + TVC_ROLLBACK_PAGE_SIZE);
+    std::memcpy(data.data() + data_offset, source + offset, bytes);
+    if (bytes != TVC_ROLLBACK_PAGE_SIZE)
+      std::memset(data.data() + data_offset + bytes, 0, TVC_ROLLBACK_PAGE_SIZE - bytes);
+    std::memcpy(shadow.data() + offset, source + offset, bytes);
+  };
+
+  if (region < 2)
   {
-    const size_t block_bytes =
-        std::min(TVC_ROLLBACK_SCAN_BLOCK_SIZE, source_size - block_offset);
-    if (std::memcmp(source + block_offset, shadow.data() + block_offset, block_bytes) == 0)
-      continue;
-    const size_t block_end = block_offset + block_bytes;
-    for (size_t offset = block_offset; offset < block_end; offset += TVC_ROLLBACK_PAGE_SIZE)
+    u8* dirty = region == 0 ? Memory::TVCRollbackDirtyMEM1() : Memory::TVCRollbackDirtyMEM2();
+    const size_t dirty_size =
+        region == 0 ? Memory::TVCRollbackDirtyMEM1Size() : Memory::TVCRollbackDirtyMEM2Size();
+    const size_t page_count =
+        (source_size + TVC_ROLLBACK_PAGE_SIZE - 1) / TVC_ROLLBACK_PAGE_SIZE;
+    if (!dirty || dirty_size < page_count)
+      return SIZE_MAX;
+
+    // MEM1/MEM2 no longer scan their full 24/64 MiB contents. The hot path only walks the
+    // 6,144/16,384 one-byte dirty maps and touches RAM for pages that were actually written.
+    for (size_t page = 0; page < page_count; ++page)
     {
-      const size_t bytes = std::min(TVC_ROLLBACK_PAGE_SIZE, source_size - offset);
-      if (std::memcmp(source + offset, shadow.data() + offset, bytes) == 0)
+      if (dirty[page] == 0)
         continue;
-      pages.push_back(static_cast<u32>(offset / TVC_ROLLBACK_PAGE_SIZE));
-      const size_t data_offset = data.size();
-      data.resize(data_offset + TVC_ROLLBACK_PAGE_SIZE);
-      std::memcpy(data.data() + data_offset, source + offset, bytes);
-      if (bytes != TVC_ROLLBACK_PAGE_SIZE)
-        std::memset(data.data() + data_offset + bytes, 0, TVC_ROLLBACK_PAGE_SIZE - bytes);
-      std::memcpy(shadow.data() + offset, source + offset, bytes);
+      dirty[page] = 0;
+      capture_page(page);
     }
   }
+  else
+  {
+    // TMEM is only 1 MiB and is written outside the CPU RAM-store machinery. Keep the proven
+    // scan here until it gets its own reliable write barrier.
+    for (size_t block_offset = 0; block_offset < source_size;
+         block_offset += TVC_ROLLBACK_SCAN_BLOCK_SIZE)
+    {
+      const size_t block_bytes =
+          std::min(TVC_ROLLBACK_SCAN_BLOCK_SIZE, source_size - block_offset);
+      if (std::memcmp(source + block_offset, shadow.data() + block_offset, block_bytes) == 0)
+        continue;
+
+      const size_t block_end = block_offset + block_bytes;
+      for (size_t offset = block_offset; offset < block_end; offset += TVC_ROLLBACK_PAGE_SIZE)
+        capture_page(offset / TVC_ROLLBACK_PAGE_SIZE);
+    }
+  }
+
   s_tvc_rollback_dirty_prepared[region] = true;
   return pages.size();
 }
