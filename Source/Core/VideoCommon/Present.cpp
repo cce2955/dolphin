@@ -28,6 +28,7 @@
 #include "VideoCommon/VideoBackendBase.h"
 
 bool TVCRollbackReplayModeEnabled();
+bool TVCRollbackStateModeEnabled();
 #endif
 
 std::unique_ptr<VideoCommon::Presenter> g_presenter;
@@ -1094,9 +1095,18 @@ void Presenter::DoState(PointerWrap& p)
     m_immediate_swap_happened_this_field.store(false, std::memory_order_relaxed);
 
 #ifdef __LIBRETRO__
-    if (g_video_backend && g_video_backend->GetConfigName() != "OGL")
-#endif
+    // Rollback snapshots intentionally omit EFB/texture contents. Restoring
+    // Presenter metadata is fine, but immediately presenting the restored XFB
+    // is not: its backing GPU texture was not restored and D3D can expose the
+    // transient purple/invalid surface. Replay will regenerate a valid XFB.
+    if (!TVCRollbackStateModeEnabled() &&
+        g_video_backend && g_video_backend->GetConfigName() != "OGL")
+    {
+      ImmediateSwap(m_last_xfb_addr, m_last_xfb_width, m_last_xfb_stride, m_last_xfb_height);
+    }
+#else
     ImmediateSwap(m_last_xfb_addr, m_last_xfb_width, m_last_xfb_stride, m_last_xfb_height);
+#endif
   }
 }
 
