@@ -773,6 +773,8 @@ extern "C" RETRO_API bool tvc_rollback_unserialize(const void* data, size_t size
     State::DoState(system, p, false);
     s_tvc_rollback_state_mode.store(false, std::memory_order_relaxed);
     valid = p.IsReadMode();
+
+
   }, true);
 
   if (!was_cpu)
@@ -861,6 +863,8 @@ extern "C" RETRO_API bool tvc_rollback_unserialize_pages(
     State::DoState(system, p, false);
     s_tvc_rollback_state_mode.store(false, std::memory_order_relaxed);
     valid = p.IsReadMode();
+
+
     for (size_t region = 0; region < s_tvc_rollback_dirty_pages.size(); ++region)
     {
       s_tvc_rollback_dirty_pages[region].clear();

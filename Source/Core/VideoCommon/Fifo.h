@@ -76,6 +76,9 @@ public:
   void EmulatorState(bool running);
   void ResetVideoBuffer();
 #ifdef __LIBRETRO__
+  void TVCRollbackDebugState(const char* tag) const;
+#endif
+#ifdef __LIBRETRO__
   void StopGpuLoop();
 #endif
 

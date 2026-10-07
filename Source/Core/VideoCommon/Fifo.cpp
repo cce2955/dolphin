@@ -4,7 +4,9 @@
 
 #include "VideoCommon/Fifo.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 #include "Common/Assert.h"
@@ -58,28 +60,104 @@ void FifoManager::RefreshConfig()
 void FifoManager::DoState(PointerWrap& p)
 {
 #ifdef __LIBRETRO__
-  if (TVCRollbackStateModeEnabled())
+  if (TVCRollbackStateModeEnabled() && m_use_deterministic_gpu_thread)
   {
-    // Single-core rollback snapshots are taken at a completed frame boundary. An empty FIFO has
-    // no live command bytes, so storing the entire 2 MiB backing buffer only adds copy cost.
+    u8* const write_ptr_now = m_video_buffer_write_ptr.load(std::memory_order_relaxed);
+    u8* const seen_ptr_now = m_video_buffer_seen_ptr.load(std::memory_order_relaxed);
+    u8* const read_ptr_now = m_video_buffer_read_ptr;
+    u8* const pp_ptr_now = m_video_buffer_pp_read_ptr;
+
+    u32 video_size = 0;
+    u32 video_read_offset = 0;
+    u32 video_write_offset = 0;
+    u32 video_seen_offset = 0;
+    u32 video_pp_offset = 0;
+
+    u8* video_begin = m_video_buffer;
+    if (!p.IsReadMode())
+    {
+      video_begin = (std::min)({read_ptr_now, write_ptr_now, seen_ptr_now, pp_ptr_now});
+      video_size = static_cast<u32>(write_ptr_now - video_begin);
+      video_read_offset = static_cast<u32>(read_ptr_now - video_begin);
+      video_write_offset = static_cast<u32>(write_ptr_now - video_begin);
+      video_seen_offset = static_cast<u32>(seen_ptr_now - video_begin);
+      video_pp_offset = static_cast<u32>(pp_ptr_now - video_begin);
+    }
+
+    p.Do(video_size);
+    p.Do(video_read_offset);
+    p.Do(video_write_offset);
+    p.Do(video_seen_offset);
+    p.Do(video_pp_offset);
+
+    if (video_size > FIFO_SIZE || video_read_offset > video_size ||
+        video_write_offset > video_size || video_seen_offset > video_size ||
+        video_pp_offset > video_size)
+    {
+      p.SetVerifyMode();
+      return;
+    }
+
+    if (video_size != 0)
+    {
+      u8* const video_state_data = p.IsReadMode() ? m_video_buffer : video_begin;
+      p.DoArray(video_state_data, video_size);
+    }
+
+    u32 aux_size = 0;
+    if (!p.IsReadMode())
+      aux_size = static_cast<u32>(m_fifo_aux_write_ptr - m_fifo_aux_read_ptr);
+
+    p.Do(aux_size);
+    if (aux_size > FIFO_SIZE)
+    {
+      p.SetVerifyMode();
+      return;
+    }
+
+    if (aux_size != 0)
+    {
+      u8* const aux_state_data = p.IsReadMode() ? m_fifo_aux_data : m_fifo_aux_read_ptr;
+      p.DoArray(aux_state_data, aux_size);
+    }
+
+    if (p.IsReadMode())
+    {
+      m_video_buffer_read_ptr = m_video_buffer + video_read_offset;
+      m_video_buffer_write_ptr.store(m_video_buffer + video_write_offset,
+                                     std::memory_order_relaxed);
+      m_video_buffer_seen_ptr.store(m_video_buffer + video_seen_offset,
+                                    std::memory_order_relaxed);
+      m_video_buffer_pp_read_ptr = m_video_buffer + video_pp_offset;
+
+      m_fifo_aux_read_ptr = m_fifo_aux_data;
+      m_fifo_aux_write_ptr = m_fifo_aux_data + aux_size;
+    }
+  }
+  else if (TVCRollbackStateModeEnabled())
+  {
     bool buffer_empty = m_video_buffer_write_ptr == m_video_buffer_read_ptr;
     p.Do(buffer_empty);
     if (!buffer_empty)
       p.DoArray(m_video_buffer, FIFO_SIZE);
+
+    u8* write_ptr = m_video_buffer_write_ptr;
+    p.DoPointer(write_ptr, m_video_buffer);
+    m_video_buffer_write_ptr = write_ptr;
+    p.DoPointer(m_video_buffer_read_ptr, m_video_buffer);
   }
   else
 #endif
   {
     p.DoArray(m_video_buffer, FIFO_SIZE);
-  }
-  u8* write_ptr = m_video_buffer_write_ptr;
-  p.DoPointer(write_ptr, m_video_buffer);
-  m_video_buffer_write_ptr = write_ptr;
-  p.DoPointer(m_video_buffer_read_ptr, m_video_buffer);
-  if (p.IsReadMode() && m_use_deterministic_gpu_thread)
-  {
-    // We're good and paused, right?
-    m_video_buffer_seen_ptr = m_video_buffer_pp_read_ptr = m_video_buffer_read_ptr;
+
+    u8* write_ptr = m_video_buffer_write_ptr;
+    p.DoPointer(write_ptr, m_video_buffer);
+    m_video_buffer_write_ptr = write_ptr;
+    p.DoPointer(m_video_buffer_read_ptr, m_video_buffer);
+
+    if (p.IsReadMode() && m_use_deterministic_gpu_thread)
+      m_video_buffer_seen_ptr = m_video_buffer_pp_read_ptr = m_video_buffer_read_ptr;
   }
 
   p.Do(m_sync_ticks);
@@ -306,6 +384,50 @@ void FifoManager::ResetVideoBuffer()
   m_fifo_aux_write_ptr = m_fifo_aux_data;
   m_fifo_aux_read_ptr = m_fifo_aux_data;
 }
+
+#ifdef __LIBRETRO__
+void FifoManager::TVCRollbackDebugState(const char* tag) const
+{
+  const auto& fifo = m_system.GetCommandProcessor().GetFifo();
+
+  const u8* const write_ptr = m_video_buffer_write_ptr.load();
+  const u8* const seen_ptr = m_video_buffer_seen_ptr.load();
+
+  auto off = [](const u8* ptr, const u8* base) -> long long {
+    return ptr && base ? static_cast<long long>(ptr - base) : -1;
+  };
+
+  static std::FILE* tvc_rb_log = nullptr;
+  if (!tvc_rb_log)
+    tvc_rb_log = std::fopen("runtime/tvc-rollback-fifo.log", "a");
+
+  std::FILE* out = tvc_rb_log ? tvc_rb_log : stderr;
+
+  std::fprintf(
+      out,
+      "[TVC-RB-FIFO] %s "
+      "det=%d "
+      "CPBase=%08x CPEnd=%08x "
+      "CPRead=%08x CPWrite=%08x CPDist=%08x "
+      "video[r=%lld w=%lld seen=%lld pp=%lld] "
+      "aux[r=%lld w=%lld]\n",
+      tag ? tag : "?",
+      m_use_deterministic_gpu_thread ? 1 : 0,
+      fifo.CPBase.load(std::memory_order_relaxed),
+      fifo.CPEnd.load(std::memory_order_relaxed),
+      fifo.CPReadPointer.load(std::memory_order_relaxed),
+      fifo.CPWritePointer.load(std::memory_order_relaxed),
+      fifo.CPReadWriteDistance.load(std::memory_order_relaxed),
+      off(m_video_buffer_read_ptr, m_video_buffer),
+      off(write_ptr, m_video_buffer),
+      off(seen_ptr, m_video_buffer),
+      off(m_video_buffer_pp_read_ptr, m_video_buffer),
+      off(m_fifo_aux_read_ptr, m_fifo_aux_data),
+      off(m_fifo_aux_write_ptr, m_fifo_aux_data));
+
+  std::fflush(out);
+}
+#endif
 
 // Description: Main FIFO update loop
 // Purpose: Keep the Core HW updated about the CPU-GPU distance
