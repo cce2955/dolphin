@@ -1,4 +1,5 @@
 #pragma once
+bool TVCRollbackReplayModeEnabled();
 // Host-only stage catalog and PCM playback. Native SSD/SRT bytes stay unchanged.
 // Included by ContinuoCharacterMusic.h after its shared types.
 namespace ContinuoStageMusic {
@@ -91,6 +92,8 @@ inline std::string Status(){auto& s=Data();std::lock_guard lock(s.mutex);return 
 
 // One owner and one stereo timeline for every AX Wii output block.
 namespace ContinuoMusicMixer {
+inline std::atomic<unsigned>& OutputMode(){static std::atomic<unsigned> mode{1};return mode;}
+inline void SetOutputMode(unsigned mode){OutputMode().store(mode<=2?mode:0,std::memory_order_relaxed);}
 struct Block {
     std::shared_ptr<const ContinuoCharacterMusic::Playback> character;
     std::shared_ptr<const ContinuoStageMusic::Playback> stage;
@@ -114,10 +117,8 @@ inline void Observe(unsigned voice,unsigned running,const std::int16_t* coeffici
                     unsigned format,unsigned leftVolume,unsigned rightVolume)
 {
     auto& b=Current();if(running!=1||format!=0||!b.codecs)return;
-    const unsigned requested=ContinuoStageMusic::Data().requested.load();
     unsigned entry=0;int channel=-1;bool left=false,right=false;
     for(const auto& codec:*b.codecs)if(std::equal(codec.coefficients.begin(),codec.coefficients.end(),coefficients)){
-        if(requested&&codec.entry!=requested)continue;
         if(entry&&entry!=codec.entry){b.ambiguous=true;return;}
         entry=codec.entry;if(codec.channel==0)left=true;else right=true;
     }
@@ -130,12 +131,15 @@ inline void Observe(unsigned voice,unsigned running,const std::int16_t* coeffici
 inline void EndDiscovery()
 {
     auto& b=Current();if(b.ambiguous||!b.entry||!b.candidates[0]||!b.candidates[1]||b.candidates[0]==b.candidates[1])return;
+    const unsigned mode=OutputMode().load(std::memory_order_relaxed);
+    if(mode==0)return;
+    b.voices=b.candidates;b.ready=true;
+    if(mode==2)return;
     ContinuoStageMusic::Request(b.entry);
     b.characterOwner=b.character&&b.character->song&&ContinuoStageMusic::Battle(b.entry);
     if(b.characterOwner){b.song=b.character->song;b.serial=b.character->serial;}
     else if(b.stage&&b.stage->entry==b.entry&&b.stage->song){b.song=b.stage->song;b.serial=b.stage->serial;}
-    if(!b.song||b.song->pcm.size()<2)return;
-    b.voices=b.candidates;b.ready=true;
+    if(!b.song||b.song->pcm.size()<2){b.ready=false;return;}
     if(b.cursorSerial!=b.serial||b.cursorCharacter!=b.characterOwner){b.frame=0;b.cursorSerial=b.serial;b.cursorCharacter=b.characterOwner;}
 }
 inline void SetVoice(unsigned voice,unsigned offset){auto& b=Current();b.voice=voice;b.offset=offset;}
@@ -143,6 +147,9 @@ inline bool Mix(std::span<std::int16_t> samples)
 {
     auto& b=Current();if(!b.ready||b.offset+samples.size()>96)return false;
     int channel=b.voice==b.voices[0]?0:b.voice==b.voices[1]?1:-1;if(channel<0)return false;
+    const unsigned mode=OutputMode().load(std::memory_order_relaxed);
+    if(mode==2){std::fill(samples.begin(),samples.end(),std::int16_t{0});b.seen|=1u<<channel;return true;}
+    if(mode!=1||!b.song||b.song->pcm.size()<2)return false;
     const auto frames=b.song->pcm.size()/2;
     for(std::size_t i=0;i<samples.size();++i)samples[i]=b.song->pcm[((b.frame+b.offset+i)%frames)*2+channel];
     b.seen|=1u<<channel;
@@ -150,7 +157,10 @@ inline bool Mix(std::span<std::int16_t> samples)
 }
 inline void EndBlock()
 {
-    auto& b=Current();if(b.ready&&b.seen==3)b.frame=(b.frame+96)%(b.song->pcm.size()/2);
+    auto& b=Current();
+    if(b.ready&&b.seen==3&&b.song&&b.song->pcm.size()>=2&&
+       OutputMode().load(std::memory_order_relaxed)==1&&!TVCRollbackReplayModeEnabled())
+        b.frame=(b.frame+96)%(b.song->pcm.size()/2);
     b.ready=false;b.song.reset();b.character.reset();b.stage.reset();b.codecs.reset();
 }
 }

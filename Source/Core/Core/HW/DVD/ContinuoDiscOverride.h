@@ -28,6 +28,7 @@ struct State {
     std::future<std::shared_ptr<std::vector<Asset>>> importJob;
     std::filesystem::path root;
     bool nativeSelectEnabled=false;
+    bool allowLegacyOverrides=false;
     std::string generation,loadingGeneration;
     std::atomic<bool> enabled{false},metadataReady{false};
     std::vector<std::uint8_t> metadataCoverage;
@@ -188,7 +189,7 @@ inline std::string PlaylistVersion(const std::filesystem::path& root)
 {std::ifstream file(root/"playlist-version.txt");std::string value;file>>value;return value;}
 inline bool Configure(const char* root,unsigned features=3)
 {
-    if(features&~3u)return false;
+    if(features&~7u)return false;
     auto next=std::make_shared<std::vector<Asset>>();
     if(root && *root) {
         const auto folder=std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(root)));
@@ -244,7 +245,8 @@ inline bool Configure(const char* root,unsigned features=3)
     if(state.importJob.valid())state.importJob.wait();
     state.importJob={};state.prepared.reset();
     state.nativeSelectEnabled=(features&2u)!=0;
-    state.root=(features&1u)&&root&&*root?std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(root))):std::filesystem::path{};
+    state.allowLegacyOverrides=(features&1u)!=0;
+    state.root=(features&(1u|4u))&&root&&*root?std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(root))):std::filesystem::path{};
     state.generation=state.root.empty()?std::string{}:PlaylistVersion(state.root);state.loadingGeneration.clear();
     ContinuoCharacterMusic::Configure(state.root);
     ContinuoStageMusic::Configure(state.root);
@@ -261,7 +263,7 @@ inline bool Configure(const char* root,unsigned features=3)
         } else Record(state,"Selected "+asset.name+": "+(asset.track.empty()?std::to_string(asset.selected):TrackLabel(asset,asset.selected)));
     }
     state.metadataReady.store(state.metadataPending==0,std::memory_order_release);
-    state.enabled.store(!state.root.empty()||!state.assets->empty(),std::memory_order_release);
+    state.enabled.store(state.allowLegacyOverrides && (!state.root.empty()||!state.assets->empty()),std::memory_order_release);
     if(!state.root.empty()&&!std::filesystem::exists(state.root/"legacy-ssd-mode.txt"))Record(state,"Stage PCM configured; native SSD/SRT unchanged. Playback is offline only.");
     if(!state.assets->empty())Record(state,"Configured; selected tracks stay paired through stream restart. Waiting for matching bgm.srt reads.");
     return true;
@@ -273,7 +275,7 @@ inline void PollImports()
     ContinuoCharacterMusic::Poll();
     ContinuoStageMusic::Poll();
     auto& state=Data();std::lock_guard lock(state.mutex);
-    if(state.root.empty())return;
+    if(state.root.empty()||!state.allowLegacyOverrides)return;
     if(!std::filesystem::exists(state.root/"legacy-ssd-mode.txt"))return;
     if(state.importJob.valid()&&state.importJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
         try {

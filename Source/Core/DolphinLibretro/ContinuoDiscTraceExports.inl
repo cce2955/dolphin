@@ -72,3 +72,10 @@ extern "C" RETRO_API size_t continuo_stage_music_status_v1(char* destination,siz
        std::copy_n(text.data(),count,destination);destination[count]=0;return count;}
   catch(...){destination[0]=0;return 0;}
 }
+
+extern "C" RETRO_API bool continuo_music_output_mode_v1(unsigned mode)
+{
+  if(mode>2)return false;
+  ContinuoMusicMixer::SetOutputMode(mode);
+  return true;
+}
